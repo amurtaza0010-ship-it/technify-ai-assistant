@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: taia_app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      # NOTE: confirm these match the variable names used in
+      # memory/redis_config.py (Member 1's Redis branch) and update if different.
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - chroma_data:/app/data/vector_store
+      - app_logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - taia_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: taia_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - taia_network
+
+  # Mock ERP server - only needed for local/dev testing.
+  # Start it with: docker compose --profile dev up
+  mock_erp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: taia_mock_erp
+    restart: unless-stopped
+    command: ["uvicorn", "mock_erp.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
+    profiles:
+      - dev
+    networks:
+      - taia_network
+
+networks:
+  taia_network:
+    driver: bridge
+
+volumes:
+  chroma_data:
+  redis_data:
+  app_logs:
