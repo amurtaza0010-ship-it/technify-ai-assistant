@@ -1,0 +1,167 @@
+name: Deploy to Production
+
+# Yeh workflow kab run hoga?
+on:
+  push:
+    branches:
+      - main  # Jab main branch par push ho
+  pull_request:
+    branches:
+      - main  # Jab main branch par PR merge ho
+
+# Jobs - yeh steps hain jo execute honge
+jobs:
+  # JOB 1: Test
+  test:
+    name: 🧪 Run Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v3
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: 📦 Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+      
+      - name: 🔑 Load Secrets for Testing
+        env:
+          # GitHub Secrets se values load karo
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+        run: |
+          # Test environment ke liye .env file banao
+          echo "OPENAI_API_KEY=$OPENAI_API_KEY" > .env
+          echo "DB_PASSWORD=$DB_PASSWORD" >> .env
+          echo "JWT_SECRET_KEY=$JWT_SECRET_KEY" >> .env
+      
+      - name: 🧪 Run Tests
+        run: |
+          pytest tests/ -v --cov=app --cov-report=xml
+      
+      - name: 📊 Upload Coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+
+  # JOB 2: Security Scan
+  security-scan:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: test  # Test pass hone ke baad hi run ho
+    
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v3
+      
+      - name: 🔍 Check for Secrets in Code
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 🛡️ Dependency Scan
+        run: |
+          pip install safety
+          safety check -r requirements.txt
+
+  # JOB 3: Deploy
+  deploy:
+    name: 🚀 Deploy to Server
+    runs-on: ubuntu-latest
+    needs: security-scan  # Security scan ke baad hi run ho
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v3
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: 🔑 Decrypt Secrets for Deployment
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          # SSH key setup for server access
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+      
+      - name: 🐳 Build Docker Image
+        run: |
+          docker build -t technify-ai-assistant:${{ github.sha }} .
+      
+      - name: 🔐 Login to Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 📤 Push Docker Image
+        run: |
+          docker tag technify-ai-assistant:${{ github.sha }} ghcr.io/amurtaza0010-ship-it/technify-ai-assistant:${{ github.sha }}
+          docker push ghcr.io/amurtaza0010-ship-it/technify-ai-assistant:${{ github.sha }}
+      
+      - name: 🚀 Deploy to Production Server
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key $DEPLOY_USER@$DEPLOY_HOST << 'EOF'
+            # Server par latest image pull karo
+            docker pull ghcr.io/amurtaza0010-ship-it/technify-ai-assistant:${{ github.sha }}
+            
+            # Old container stop karo
+            docker stop technify-ai-app || true
+            docker rm technify-ai-app || true
+            
+            # Naya container run karo (with secrets from environment)
+            docker run -d \
+              --name technify-ai-app \
+              --restart always \
+              -p 8000:8000 \
+              -e DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+              -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+              -e JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
+              -e REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}" \
+              ghcr.io/amurtaza0010-ship-it/technify-ai-assistant:${{ github.sha }}
+            
+            # Health check
+            sleep 5
+            curl -f http://localhost:8000/health || exit 1
+            
+            echo "✅ Deployment successful!"
+          EOF
+      
+      - name: 📝 Notify on Success
+        if: success()
+        run: |
+          echo "✅ Deployed successfully! SHA: ${{ github.sha }}"
+      
+      - name: ❌ Notify on Failure
+        if: failure()
+        run: |
+          echo "❌ Deployment failed! Check logs."
+
+  # JOB 4: Rollback (if needed)
+  rollback:
+    name: 🔄 Rollback
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: failure()
+    steps:
+      - name: ⚠️ Rollback Initiated
+        run: |
+          echo "⚠️ Deployment failed! Rolling back to previous version..."
+          # Rollback logic here
