@@ -7,16 +7,30 @@ This is the main entry point for the AI Assistant microservice.
 Run with: uvicorn app.main:app --reload
 """
 
-from fastapi import FastAPI, Depends
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
+import json
+import time
 
 # Import the RoleChecker from our custom authorization module
 from app.auth.rbac import RoleChecker  
+# Import our new JWT handler
+from app.auth.jwt_handler import verify_user_access
 
 # Load environment variables from .env file
 load_dotenv()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("=" * 50)
+    print("Technify Academic AI Assistant (TAIA)")
+    print("Service is starting...")
+    print(f"Docs available at: http://localhost:{os.getenv('APP_PORT', 8000)}/docs")
+    print("=" * 50)
+    yield
 
 # Initialize FastAPI application
 app = FastAPI(
@@ -24,7 +38,8 @@ app = FastAPI(
     description="AI-powered academic assistant integrated with Technify University ERP",
     version="0.1.0",
     docs_url="/docs",          # Swagger UI path
-    redoc_url="/redoc",        # ReDoc path
+    redoc_url="/redoc",        # ReDoc path,
+    lifespan=lifespan,
 )
 
 # CORS Middleware configuration to allow the ERP frontend to make requests
@@ -108,26 +123,27 @@ async def get_fee_report():
 
 
 from app.chains.chatbot_chain import (
-    generate_chat_response, generate_contextual_response, classify_intent)
+    generate_chat_response, generate_contextual_response, classify_intent_async)
 from app.services.erp_connector import *
 from app.services.study_planner import generate_study_plan
 from app.services.knowledge_base import query_knowledge_base
 from app.services.audit_logger import log_request
-from fastapi import Request
-import json, time
 
 # ========== Chat Endpoint ==========
 
 @app.post('/api/v1/chat', tags=['Chat'])
-async def chat(request: Request, message: dict):
-    uid      = request.headers.get('x-user-id', 'STU-0001')
-    role     = request.headers.get('x-user-role', 'Student')
+async def chat(request: Request, message: dict, user_data: dict = Depends(verify_user_access)):
+    # Extract user information from the validated token/headers
+    uid      = user_data.get('user_id', 'STU-0001')
+    role     = user_data.get('role', 'Student')
     session  = request.headers.get('x-session-id', uid)
     user_msg = message.get('message', '')
+    
     if not user_msg: return {'response': 'Please provide a message.'}
     start    = time.time()
-    intent   = classify_intent(user_msg, role)
+    intent   = await classify_intent_async(session, user_msg, role)
     erp_data = ''
+    
     try:
         # ■■ Student intents ■■
         if   intent == 'attendance' : erp_data = json.dumps(await get_student_attendance(uid))
@@ -143,9 +159,9 @@ async def chat(request: Request, message: dict):
         elif intent == 'policy'     : erp_data = query_knowledge_base(user_msg)
         
         # ■■ Faculty intents ■■
-        elif intent == 'faculty_attendance': erp_data = json.dumps(await get_faculty_courses(uid))
+        elif intent == 'faculty_attendance': erp_data = json.dumps(await get_all_faculty_attendance(uid))
         elif intent == 'faculty_ungraded'  : erp_data = json.dumps(await get_faculty_assignments(uid))
-        elif intent == 'faculty_at_risk'   : erp_data = json.dumps(await get_faculty_courses(uid))
+        elif intent == 'faculty_at_risk'   : erp_data = json.dumps(await get_all_faculty_at_risk(uid))
         
         # ■■ Admin intents — use actual erp_connector function names ■■
         elif intent == 'admin_students'   : erp_data = json.dumps(await get_admin_student_stats())
@@ -165,16 +181,19 @@ async def chat(request: Request, message: dict):
     return {'response': ai, 'intent': intent, 'time': f'{elapsed}s'}
 
 
-# ========== Application Startup Event ==========
+# ========== Audit Logs & Usage Stats Endpoints ==========
 
-@app.on_event("startup")
-async def startup_event():
-    print("=" * 50)
-    print("Technify Academic AI Assistant (TAIA)")
-    print("Service is starting...")
-    print(f"Docs available at: http://localhost:{os.getenv('APP_PORT', 8000)}/docs")
-    print("=" * 50)
+from app.services.audit_logger import get_recent_logs, get_stats as get_audit_stats
 
+@app.get('/api/v1/admin/audit-logs', tags=['Admin Reports'], dependencies=[Depends(allow_only_admin)])
+async def audit_logs(limit: int = 50):
+    """Return recent audit log entries from the database."""
+    return get_recent_logs(limit=limit)
+
+@app.get('/api/v1/admin/usage-stats', tags=['Admin Reports'], dependencies=[Depends(allow_only_admin)])
+async def usage_stats():
+    """Return overall usage statistics."""
+    return get_audit_stats()
 
 if __name__ == "__main__":
     import uvicorn
@@ -182,5 +201,5 @@ if __name__ == "__main__":
         "app.main:app",
         host=os.getenv("APP_HOST", "0.0.0.0"),
         port=int(os.getenv("APP_PORT", 8000)),
-        reload=True,
+        reload=False,
     )

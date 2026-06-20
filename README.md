@@ -46,36 +46,16 @@ technify-ai-assistant/
 └── docs/                    # Documentation
 ```
 
-## 🚀 Quick Start
+## 🚀 Quick Start & Deployment
 
-### 1. Clone & Setup
-```bash
-git clone <repo-url>
-cd technify-ai-assistant
-python -m venv venv
-venv\Scripts\activate        # Windows
-# source venv/bin/activate   # Mac/Linux
-pip install -r requirements.txt
-```
+We have prepared a comprehensive setup guide that covers everything from Git cloning, environment variables, Mock Data generation, and Docker Deployment.
 
-### 2. Configure Environment
-```bash
-copy .env.example .env
-# Edit .env with your API keys
-```
+**Please refer to the official [TAIA Setup & Deployment Guide](./team_setup_guide.md) for full instructions.**
 
-### 3. Generate Test Data
-```bash
-python scripts/generate_data.py
-```
-
-### 4. Run the Server
-```bash
-uvicorn app.main:app --reload
-```
-
-### 5. Open API Docs
-Visit: http://localhost:8000/docs
+### Key Deployment Features
+- **Development Mode**: Run locally with direct access to FastAPI, Mock ERP, and the Flask Frontend.
+- **Production Mode**: One-click deployment using `docker-compose up --build -d` which spins up the AI Gateway, Mock ERP, and a Redis container.
+- **Admin Dashboard**: Integrated UI dashboard to view all user queries, latency metrics, and roles from the SQLite audit logs.
 
 ## 👥 Team
 

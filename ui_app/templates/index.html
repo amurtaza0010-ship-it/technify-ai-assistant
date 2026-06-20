@@ -1,48 +1,104 @@
 <!DOCTYPE html>
-<html>
+<html lang="en" data-theme="light">
 <head>
-    <title>TAIA</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TAIA - Technify Academic AI Assistant</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Markdown Parser -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
-
 <body>
-    <div id="chat-container">
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-top">
+                <button class="new-chat-btn" onclick="startNewChat()">
+                    <i class="fas fa-plus"></i> New Chat
+                </button>
+            </div>
 
-        <div id="header">
-            <h2>TAIA - Technify AI Assistant</h2>
-        </div>
+            <div class="quick-questions" id="quickQuestions" style="display:none;">
+                <h4><i class="fas fa-bolt"></i> Quick Prompts</h4>
+                <div id="questionsList"></div>
+            </div>
 
-        <div class="login-bar">
-            <select id="role">
-                <option value="Student">Student</option>
-                <option value="Faculty">Faculty</option>
-                <option value="Admin">Admin</option>
-            </select>
+            <div class="sidebar-bottom">
+                <button class="theme-toggle" onclick="toggleTheme()" id="themeToggleBtn">
+                    <i class="fas fa-sun"></i> Light Mode
+                </button>
+                <a href="/admin" style="text-decoration: none;">
+                    <button class="theme-toggle" style="color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
+                        <i class="fas fa-shield-alt"></i> Admin Dashboard
+                    </button>
+                </a>
 
-            <input
-                type="text"
-                id="user_id"
-                placeholder="ID (e.g. STU-0001)"
-            >
-        </div>
+                <div class="login-section" id="loginSection">
+                    <div class="form-group">
+                        <input type="text" id="userId" value="STU-0001" placeholder="e.g. STU-0001">
+                    </div>
+                    <div class="form-group">
+                        <select id="userRole" onchange="updateDefaultId()">
+                            <option value="student">Student</option>
+                            <option value="faculty">Faculty</option>
+                            <option value="admin">Admin</option>
+                            <option value="finance">Finance Officer</option>
+                            <option value="exam_officer">Exam Officer</option>
+                        </select>
+                    </div>
+                    <button class="btn-login" onclick="login()">Login to TAIA</button>
+                    <div id="loginError" class="login-error"></div>
+                </div>
 
-        <div id="chat-box"></div>
+                <div class="user-info" id="userInfo" style="display:none;">
+                    <div class="user-badge">
+                        <div class="avatar" id="userAvatar">S</div>
+                        <div class="user-details">
+                            <strong id="userName">Student</strong>
+                            <span class="role-badge" id="userRoleBadge">student</span>
+                        </div>
+                    </div>
+                    <button class="btn-logout" onclick="logout()"><i class="fas fa-sign-out-alt"></i> Logout</button>
+                </div>
+            </div>
+        </aside>
 
-        <div class="input-bar">
-            <input
-                type="text"
-                id="message"
-                placeholder="Ask TAIA..."
-                onkeypress="if(event.key==='Enter')sendMessage()"
-            >
+        <!-- Main Chat Area -->
+        <main class="chat-area">
+            <div class="chat-header">
+                <button class="menu-btn" onclick="toggleSidebar()"><i class="fas fa-bars"></i></button>
+                <div class="header-title">
+                    <h2>TAIA <span>Auto-Router</span></h2>
+                </div>
+            </div>
+            
+            <div class="messages" id="messages">
+                <div class="welcome-msg">
+                    <div class="logo-large">
+                        <i class="fas fa-graduation-cap"></i>
+                    </div>
+                    <h2>How can I help you today?</h2>
+                    <p class="subtitle">Login from the sidebar to access your personalized academic dashboard.</p>
+                </div>
+            </div>
 
-            <button onclick="sendMessage()">
-                Send
-            </button>
-        </div>
-
+            <div class="input-area">
+                <div class="input-container">
+                    <div class="input-wrapper">
+                        <textarea id="msgInput" placeholder="Message TAIA..." onkeydown="handleKeydown(event)" disabled rows="1"></textarea>
+                        <button class="btn-send" onclick="sendMessage()" id="sendBtn" disabled>
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                    <div class="input-footer">
+                        TAIA is powered by Technify University ERP. Responses are AI-generated and should be verified.
+                    </div>
+                </div>
+            </div>
+        </main>
     </div>
-
-    <script src="/static/chat.js"></script>
+    <script src="/static/app.js?v=2"></script>
 </body>
 </html>

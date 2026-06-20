@@ -51,6 +51,26 @@ async def get_faculty_assignments(faculty_id: str) -> dict:
 async def get_course_students(faculty_id: str, course_id: str) -> dict:
     return await _get(f"/faculty/{faculty_id}/course/{course_id}/students")
 
+async def get_all_faculty_attendance(faculty_id: str) -> dict:
+    courses_data = await get_faculty_courses(faculty_id)
+    courses = courses_data.get("courses", [])
+    all_attendance = []
+    for c in courses:
+        att = await get_course_attendance(faculty_id, c["course_code"])
+        att["course_name"] = c["course_name"]
+        all_attendance.append(att)
+    return {"faculty_id": faculty_id, "attendance_by_course": all_attendance}
+
+async def get_all_faculty_at_risk(faculty_id: str) -> dict:
+    courses_data = await get_faculty_courses(faculty_id)
+    courses = courses_data.get("courses", [])
+    all_at_risk = []
+    for c in courses:
+        risk = await get_course_students(faculty_id, c["course_code"])
+        risk["course_name"] = c["course_name"]
+        all_at_risk.append(risk)
+    return {"faculty_id": faculty_id, "at_risk_by_course": all_at_risk}
+
 # ── Admin APIs ──
 async def get_admin_student_stats() -> dict:
     return await _get("/admin/statistics/students")

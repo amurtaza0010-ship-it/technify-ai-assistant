@@ -1,3 +1,40 @@
+<<<<<<< HEAD
+version: '3.8'
+
+services:
+  # 1. AI Gateway (FastAPI)
+  ai_gateway:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_PORT=8000
+      - REDIS_URL=redis://redis:6379/0
+      - ERP_BASE_URL=http://mock_erp:8001
+      - CORS_ORIGINS=http://localhost:5000,http://127.0.0.1:5000
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - mock_erp
+    networks:
+      - taia_network
+
+  # 2. Mock ERP System (FastAPI)
+  mock_erp:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn mock_erp.main:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    networks:
+      - taia_network
+
+  # 3. Persistent Memory Store (Redis)
+  redis:
+    image: redis:7-alpine
+=======
 version: "3.9"
 
 services:
@@ -36,10 +73,35 @@ services:
     container_name: taia_redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
+>>>>>>> main
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
+<<<<<<< HEAD
+    networks:
+      - taia_network
+
+  # 4. Web Frontend (Flask)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python ui_app/app.py
+    ports:
+      - "5000:5000"
+    environment:
+      - AI_API_URL=http://localhost:8000/api/v1/chat
+    networks:
+      - taia_network
+
+volumes:
+  redis_data:
+
+networks:
+  taia_network:
+    driver: bridge
+=======
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -72,3 +134,4 @@ volumes:
   chroma_data:
   redis_data:
   app_logs:
+>>>>>>> main

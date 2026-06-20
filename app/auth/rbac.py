@@ -6,8 +6,11 @@ class RoleChecker:
         self.allowed_roles = allowed_roles
 
     def __call__(self, user: dict = Depends(verify_user_access)):
-        if user["role"] not in self.allowed_roles:
-            # Urdu message ko English se badal diya
+        # Convert roles to lowercase for case-insensitive comparison
+        user_role = user.get("role", "").lower()
+        allowed_lower = [r.lower() for r in self.allowed_roles]
+        
+        if user_role not in allowed_lower:
             raise HTTPException(
                 status_code=403, 
                 detail="Access denied. You do not have permission to access this resource!"

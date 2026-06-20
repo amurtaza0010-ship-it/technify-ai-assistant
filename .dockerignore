@@ -1,3 +1,15 @@
+<<<<<<< HEAD
+.git
+.gitignore
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+docs/
+scratch/
+venv/
+env/
+=======
 # Git
 .git
 .github
@@ -47,3 +59,4 @@ Thumbs.db
 # Misc
 *.md
 !README.md
+>>>>>>> main

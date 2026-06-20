@@ -4,11 +4,14 @@
 # Web Framework
 fastapi>=0.115.9
 uvicorn[standard]>=0.34.0
+gunicorn>=21.2.0
 
 # AI / LLM
 langchain>=0.3.0
 langchain-openai>=0.3.0
 langchain-community>=0.3.0
+redis>=5.0.0
+langchain-redis>=0.0.2
 openai>=1.80.0
 
 # Vector Database (Knowledge Base)
@@ -22,6 +25,9 @@ passlib[bcrypt]>=1.7.4
 pandas>=2.2.0
 faker>=37.0.0
 
+# Database
+sqlalchemy>=2.0.0
+
 # HTTP Client (for calling ERP APIs)
 httpx>=0.28.0
 
@@ -34,3 +40,16 @@ pytest-asyncio>=0.24.0
 
 # CORS
 python-multipart>=0.0.18
+
+# DATABASE DEPENDENCIES
+sqlalchemy>=2.0.0
+
+# Frontend
+flask>=3.0.0
+
+# LangChain Chroma integration
+langchain-chroma>=0.1.0
+
+# Embeddings support (prevents runtime failures)
+sentence-transformers>=3.0.0
+tiktoken>=0.7.0
