@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 .git
 .gitignore
 __pycache__/
@@ -8,3 +9,54 @@ docs/
 scratch/
 venv/
 env/
+=======
+# Git
+.git
+.github
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment & secrets - NEVER bake these into an image
+.env
+.env.example.backup
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Project data that shouldn't ship inside the image
+# (these are mounted as volumes instead - see docker-compose.yml)
+data/vector_store/
+logs/
+*.log
+
+# Tests & docs - not needed at runtime
+tests/
+docs/
+
+# Frontend chat widget - built/deployed separately
+chat_widget/node_modules/
+chat_widget/.next/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.md
+!README.md
+>>>>>>> main
