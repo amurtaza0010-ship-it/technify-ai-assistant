@@ -1,4 +1,3 @@
-import React from "react";
 import styles from "../styles/chat.module.css";
 import type { ChatMessageType } from "../hooks/useChat";
 
@@ -11,7 +10,7 @@ function formatTime(timestamp: number): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
+function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.sender === "user";
 
   return (
@@ -32,6 +31,6 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
       </div>
     </div>
   );
-};
+}
 
 export default ChatMessage;

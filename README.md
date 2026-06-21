@@ -52,6 +52,73 @@ We have prepared a comprehensive setup guide that covers everything from Git clo
 
 **Please refer to the official [TAIA Setup & Deployment Guide](./team_setup_guide.md) for full instructions.**
 
+### Phase 1 — Project Setup (First-Time Install)
+
+Run these commands once after cloning the repository (with your virtual environment activated):
+
+```bash
+# Clone and enter the project
+git clone https://github.com/your-org/technify-ai-assistant.git
+cd technify-ai-assistant
+
+# Create and activate virtual environment
+python -m venv venv
+# Windows:
+.\venv\Scripts\activate
+# Mac/Linux:
+source venv/bin/activate
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Generate mock data and vector store (required — not committed to git)
+python scripts/generate_data.py
+python scripts/ingest_documents.py
+```
+
+Create a `.env` file in the project root (see `team_setup_guide.md` for the full variable list).
+
+### Phase 2 — Development Mode (3 Terminals)
+
+Start all three services in **separate terminal windows** (venv activated in each):
+
+**Terminal 1 — Mock ERP (port 8001):**
+```bash
+uvicorn mock_erp.main:app --port 8001
+```
+
+**Terminal 2 — FastAPI AI Backend (port 8000):**
+```bash
+python -m app.main
+```
+
+**Terminal 3 — Flask UI with React Chat Widget (port 5000):**
+```bash
+python ui_app/app.py
+```
+
+Open the UI at: **http://127.0.0.1:5000**
+
+#### Rebuilding the React Chat Widget
+
+After making changes inside `chat_widget/`, rebuild and redeploy static assets:
+
+```bash
+cd chat_widget
+npm run build
+```
+
+Then copy the generated `.js` and `.css` files from `chat_widget/dist/assets/` into `ui_app/static/` and update the filenames in `ui_app/templates/index.html` if they changed.
+
+For local React development (hot reload on port 5173):
+
+```bash
+cd chat_widget
+npm run dev
+```
+
+The Vite dev server proxies `/api` requests to `http://localhost:8000`.
+
 ### Key Deployment Features
 - **Development Mode**: Run locally with direct access to FastAPI, Mock ERP, and the Flask Frontend.
 - **Production Mode**: One-click deployment using `docker-compose up --build -d` which spins up the AI Gateway, Mock ERP, and a Redis container.

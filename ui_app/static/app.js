@@ -1,4 +1,4 @@
-// TAIA Chat Application
+﻿// TAIA Chat Application
 const API = 'http://localhost:8000';
 let token = null;
 let sessionId = null;

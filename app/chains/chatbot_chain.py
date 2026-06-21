@@ -10,11 +10,10 @@ storage so the app never crashes.
 """
 
 import os
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
-from app.config import get_settings
 from app.prompts.templates import SYSTEM_PERSONA, ATTENDANCE_PROMPT, RESULTS_PROMPT, COURSE_PROMPT
+from app.services.llm import LLM_CONNECTION_ERROR, get_llm, is_llm_auth_error
 
 
 
@@ -89,22 +88,7 @@ def get_chatbot_chain(session_id: str):
     """
     Create and return the ChatOpenAI LLM instance using central config.
     """
-    settings = get_settings()
-    
-    api_key = settings.LLM_API_KEY
-    base_url = settings.LLM_BASE_URL
-    model_name = settings.LLM_MODEL
-
-    # Guard: LangChain requires a non-empty key string
-    if not api_key or len(api_key) < 5:
-        api_key = "sk-placeholder-key-for-langchain"
-
-    return ChatOpenAI(
-        api_key=api_key,
-        base_url=base_url,
-        model=model_name,
-        temperature=0.3
-    )
+    return get_llm()
 
 
 # ── Step 5: Main chat entry point ─────────────────────────────────────────────
@@ -136,6 +120,8 @@ async def generate_chat_response(session_id: str, user_message: str) -> str:
 
     except Exception as e:
         print(f"LangChain Error: {e}")
+        if is_llm_auth_error(e):
+            return LLM_CONNECTION_ERROR
         return f"I'm sorry, I encountered an error connecting to my AI brain. (Error: {e})"
 
 

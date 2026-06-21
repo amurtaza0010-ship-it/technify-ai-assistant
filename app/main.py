@@ -7,10 +7,13 @@ This is the main entry point for the AI Assistant microservice.
 Run with: uvicorn app.main:app --reload
 """
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 import os
 import json
 import time
@@ -19,9 +22,7 @@ import time
 from app.auth.rbac import RoleChecker  
 # Import our new JWT handler
 from app.auth.jwt_handler import verify_user_access
-
-# Load environment variables from .env file
-load_dotenv()
+from app.services.llm import check_llm_api_key
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
     print("Technify Academic AI Assistant (TAIA)")
     print("Service is starting...")
     print(f"Docs available at: http://localhost:{os.getenv('APP_PORT', 8000)}/docs")
+    check_llm_api_key()
     print("=" * 50)
     yield
 

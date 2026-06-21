@@ -1,15 +1,16 @@
-import React, { useState, useRef, useEffect } from "react";
+"use client";
+
+import { useState, useRef, useEffect, type KeyboardEvent } from "react";
 import styles from "../styles/chat.module.css";
 import ChatMessage from "./ChatMessage";
 import { useChat } from "../hooks/useChat";
 
-const ChatWidget: React.FC = () => {
+function ChatWidget() {
   const [isOpen, setIsOpen] = useState(false);
   const [inputValue, setInputValue] = useState("");
   const { messages, isLoading, sendMessage } = useChat();
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto scroll to the latest message
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isOpen]);
@@ -20,7 +21,7 @@ const ChatWidget: React.FC = () => {
     setInputValue("");
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       handleSend();
     }
@@ -80,6 +81,6 @@ const ChatWidget: React.FC = () => {
       </button>
     </div>
   );
-};
+}
 
 export default ChatWidget;

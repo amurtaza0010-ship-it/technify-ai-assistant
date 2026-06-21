@@ -4,11 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TAIA - Technify Academic AI Assistant</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Markdown Parser -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" crossorigin href="{{ url_for('static', filename='index-BK8ISsbG.css') }}">
 </head>
 <body>
     <div class="app">
@@ -99,6 +100,8 @@
             </div>
         </main>
     </div>
-    <script src="/static/app.js?v=2"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=2"></script>
+    <div id="widget-root"></div>
+    <script type="module" crossorigin src="{{ url_for('static', filename='index-Bmp0inQ4.js') }}"></script>
 </body>
 </html>
