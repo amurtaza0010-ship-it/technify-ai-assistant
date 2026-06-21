@@ -1,137 +1,62 @@
-<<<<<<< HEAD
-version: '3.8'
-
-services:
-  # 1. AI Gateway (FastAPI)
-  ai_gateway:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - APP_PORT=8000
-      - REDIS_URL=redis://redis:6379/0
-      - ERP_BASE_URL=http://mock_erp:8001
-      - CORS_ORIGINS=http://localhost:5000,http://127.0.0.1:5000
-    env_file:
-      - .env
-    depends_on:
-      - redis
-      - mock_erp
-    networks:
-      - taia_network
-
-  # 2. Mock ERP System (FastAPI)
-  mock_erp:
-    build: 
-      context: .
-      dockerfile: Dockerfile
-    command: uvicorn mock_erp.main:app --host 0.0.0.0 --port 8001
-    ports:
-      - "8001:8001"
-    networks:
-      - taia_network
-
-  # 3. Persistent Memory Store (Redis)
-  redis:
-    image: redis:7-alpine
-=======
 version: "3.9"
 
 services:
-  app:
+  erp:
     build:
       context: .
-      dockerfile: Dockerfile
-    container_name: taia_app
-    restart: unless-stopped
+      dockerfile: Dockerfile.mock_erp
+    container_name: taia_mock_erp
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "8001:8001"
     env_file:
       - .env
-    environment:
-      # NOTE: confirm these match the variable names used in
-      # memory/redis_config.py (Member 1's Redis branch) and update if different.
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-    volumes:
-      - chroma_data:/app/data/vector_store
-      - app_logs:/app/logs
-    depends_on:
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
     networks:
       - taia_network
 
   redis:
     image: redis:7-alpine
     container_name: taia_redis
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
->>>>>>> main
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
-<<<<<<< HEAD
     networks:
       - taia_network
 
-  # 4. Web Frontend (Flask)
-  frontend:
+  fastapi:
     build:
       context: .
-      dockerfile: Dockerfile
-    command: python ui_app/app.py
+      dockerfile: Dockerfile.fastapi
+    container_name: taia_fastapi
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      ERP_API_BASE_URL: http://erp:8001/api/v1
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+      REDIS_HOST: redis
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - erp
+      - redis
+    networks:
+      - taia_network
+
+  flask:
+    build:
+      context: .
+      dockerfile: Dockerfile.flask
+    container_name: taia_flask
     ports:
       - "5000:5000"
-    environment:
-      - AI_API_URL=http://localhost:8000/api/v1/chat
-    networks:
-      - taia_network
-
-volumes:
-  redis_data:
-
-networks:
-  taia_network:
-    driver: bridge
-=======
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    networks:
-      - taia_network
-
-  # Mock ERP server - only needed for local/dev testing.
-  # Start it with: docker compose --profile dev up
-  mock_erp:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: taia_mock_erp
-    restart: unless-stopped
-    command: ["uvicorn", "mock_erp.main:app", "--host", "0.0.0.0", "--port", "8001"]
-    ports:
-      - "8001:8001"
-    profiles:
-      - dev
+    env_file:
+      - .env
+    depends_on:
+      - erp
+      - fastapi
     networks:
       - taia_network
 
 networks:
   taia_network:
     driver: bridge
-
-volumes:
-  chroma_data:
-  redis_data:
-  app_logs:
->>>>>>> main

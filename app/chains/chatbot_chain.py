@@ -22,12 +22,24 @@ from app.services.llm import LLM_CONNECTION_ERROR, get_llm, is_llm_auth_error
 _use_redis = False
 _memories = {}  # fallback in-memory store
 
+
+def _get_redis_url() -> str:
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        return redis_url
+    host = os.getenv("REDIS_HOST", "localhost")
+    port = os.getenv("REDIS_PORT", "6379")
+    db = os.getenv("REDIS_DB", "0")
+    return f"redis://{host}:{port}/{db}"
+
+
 try:
     import redis
     from langchain_community.chat_message_histories import RedisChatMessageHistory
 
+    _redis_url = _get_redis_url()
     _redis_client = redis.from_url(
-        os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+        _redis_url,
         decode_responses=True,
         socket_connect_timeout=2   # fail fast if Redis is not reachable
     )
@@ -52,7 +64,7 @@ def _get_history(session_id: str):
     if _use_redis:
         history = RedisChatMessageHistory(
             session_id=f"taia:{session_id}",
-            url=os.getenv("REDIS_URL", "redis://localhost:6379/0")
+            url=_get_redis_url()
         )
         msgs = [SystemMessage(content=SYSTEM_PERSONA)]
         msgs.extend(history.messages)   # previous turns loaded from Redis

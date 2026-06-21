@@ -1,0 +1,27 @@
+# Mock ERP (FastAPI) — port 8001
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn[standard] \
+    python-jose[cryptography] \
+    python-dotenv \
+    pandas \
+    faker
+
+COPY mock_erp/ ./mock_erp/
+COPY app/__init__.py ./app/__init__.py
+COPY app/auth/ ./app/auth/
+COPY scripts/generate_data.py ./scripts/generate_data.py
+
+RUN mkdir -p data/synthetic && python scripts/generate_data.py
+
+EXPOSE 8001
+
+CMD ["uvicorn", "mock_erp.main:app", "--host", "0.0.0.0", "--port", "8001"]

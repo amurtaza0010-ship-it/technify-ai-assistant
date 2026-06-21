@@ -1,0 +1,31 @@
+# TAIA FastAPI AI Backend — port 8000
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    APP_HOST=0.0.0.0 \
+    APP_PORT=8000
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY app/ ./app/
+COPY data/ ./data/
+COPY scripts/ ./scripts/
+COPY gunicorn.conf.py .
+
+RUN python scripts/generate_data.py && \
+    python scripts/ingest_documents.py
+
+EXPOSE 8000
+
+CMD ["python", "-m", "app.main"]

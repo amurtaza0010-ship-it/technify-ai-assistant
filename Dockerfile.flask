@@ -1,0 +1,26 @@
+# TAIA Flask UI — port 5000 (builds React chat widget during image build)
+FROM node:20-alpine AS widget-builder
+
+WORKDIR /app/chat_widget
+
+COPY chat_widget/package.json chat_widget/package-lock.json ./
+RUN npm install
+
+COPY chat_widget/ ./
+RUN npm run build
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir flask
+
+COPY ui_app/ ./ui_app/
+COPY --from=widget-builder /app/chat_widget/dist/assets/ ./ui_app/static/
+
+EXPOSE 5000
+
+CMD ["python", "ui_app/app.py"]

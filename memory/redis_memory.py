@@ -10,6 +10,7 @@ Requires: redis>=5.0, langchain-core (pip install redis langchain-core)
 from __future__ import annotations
 
 import json
+import os
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -37,12 +38,23 @@ _memory_settings = get_redis_memory_settings()
 _pool: Optional[aioredis.ConnectionPool] = None
 
 
+def _get_redis_url() -> str:
+    """Resolve Redis URL — uses REDIS_URL, or builds from REDIS_HOST (Docker: redis)."""
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        return redis_url
+    host = os.getenv("REDIS_HOST", _connection_settings.HOST)
+    port = os.getenv("REDIS_PORT", str(_connection_settings.PORT))
+    db = os.getenv("REDIS_DB", str(_connection_settings.DB))
+    return f"redis://{host}:{port}/{db}"
+
+
 def _get_pool() -> aioredis.ConnectionPool:
     """Lazily builds a single shared connection pool for the whole app."""
     global _pool
     if _pool is None:
         _pool = aioredis.ConnectionPool.from_url(
-            _connection_settings.connection_url,
+            _get_redis_url(),
             max_connections=_connection_settings.MAX_CONNECTIONS,
             socket_timeout=_connection_settings.SOCKET_TIMEOUT,
             socket_connect_timeout=_connection_settings.SOCKET_CONNECT_TIMEOUT,

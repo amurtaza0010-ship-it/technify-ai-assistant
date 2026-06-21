@@ -4,7 +4,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings:
-    ERP_API_BASE_URL: str = "http://localhost:8001"
+    ERP_API_BASE_URL: str = os.getenv(
+        "ERP_API_BASE_URL", "http://localhost:8001/api/v1"
+    )
     LLM_API_KEY: str = (
         os.getenv("GROQ_API_KEY")
         or os.getenv("LLM_API_KEY")
