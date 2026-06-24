@@ -36,6 +36,8 @@ services:
       APP_PORT: 8000
       REDIS_HOST: redis
       REDIS_URL: redis://redis:6379/0
+      GUNICORN_WORKERS: "1"
+      LOG_LEVEL: INFO
     depends_on:
       - erp
       - redis
@@ -51,6 +53,8 @@ services:
       - "5000:5000"
     env_file:
       - .env
+    environment:
+      ERP_API_BASE_URL: http://erp:8001/api/v1
     depends_on:
       - erp
       - fastapi

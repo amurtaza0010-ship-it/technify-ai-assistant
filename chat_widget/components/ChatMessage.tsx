@@ -1,4 +1,5 @@
-import styles from "../styles/chat.module.css";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { ChatMessageType } from "../hooks/useChat";
 
 interface ChatMessageProps {
@@ -14,18 +15,26 @@ function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.sender === "user";
 
   return (
-    <div
-      className={`${styles.messageRow} ${
-        isUser ? styles.messageRowUser : styles.messageRowBot
-      }`}
-    >
+    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`${styles.messageBubble} ${
-          isUser ? styles.userBubble : styles.botBubble
+        className={`max-w-[85%] rounded-2xl px-3 py-2 ${
+          isUser
+            ? "rounded-br-md bg-brand-500 text-white"
+            : "rounded-bl-md border border-slate-100 bg-slate-50 text-slate-800"
         }`}
       >
-        <p className={styles.messageText}>{message.text}</p>
-        <span className={styles.messageTime}>
+        {isUser ? (
+          <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.text}</p>
+        ) : (
+          <div className="markdown-content text-sm leading-relaxed text-slate-800">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+          </div>
+        )}
+        <span
+          className={`mt-1 block text-[10px] ${
+            isUser ? "text-emerald-100" : "text-slate-400"
+          }`}
+        >
           {formatTime(message.timestamp)}
         </span>
       </div>

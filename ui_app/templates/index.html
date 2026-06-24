@@ -4,43 +4,74 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TAIA - Technify Academic AI Assistant</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: ['selector', '[data-theme="dark"]'],
+            theme: {
+                extend: {
+                    colors: {
+                        brand: { 500: '#10A37F', 600: '#0d8f6e' }
+                    }
+                }
+            }
+        }
+    </script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <!-- Markdown Parser -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" crossorigin href="{{ url_for('static', filename='index-BK8ISsbG.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='widget.css') }}">
 </head>
 <body>
     <div class="app">
         <!-- Sidebar -->
         <aside class="sidebar" id="sidebar">
-            <div class="sidebar-top">
+            <div class="sidebar-top space-y-4 p-4">
+                <div class="flex items-center gap-3 border-b border-[var(--border-color)] pb-4">
+                    <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-brand-500 text-white">
+                        <i class="fas fa-graduation-cap"></i>
+                    </div>
+                    <div>
+                        <p class="text-sm font-semibold text-[var(--text-primary)]">TAIA Portal</p>
+                        <p class="text-xs text-[var(--text-secondary)]">Enterprise ERP</p>
+                    </div>
+                </div>
+
                 <button class="new-chat-btn" onclick="startNewChat()">
                     <i class="fas fa-plus"></i> New Chat
                 </button>
+
+                <div class="quick-questions" id="quickQuestions" style="display:none;">
+                    <h4><i class="fas fa-bolt"></i> Quick Prompts</h4>
+                    <div id="questionsList" class="space-y-1"></div>
+                </div>
+
+                <div class="chat-history" id="chatHistory" style="display:none;">
+                    <h4 class="chat-history-heading">📜 Chat History</h4>
+                    <ul id="chat-history-list" class="history-list">
+                        <li class="history-empty">No history available</li>
+                    </ul>
+                </div>
             </div>
 
-            <div class="quick-questions" id="quickQuestions" style="display:none;">
-                <h4><i class="fas fa-bolt"></i> Quick Prompts</h4>
-                <div id="questionsList"></div>
-            </div>
-
-            <div class="sidebar-bottom">
+            <div class="sidebar-bottom space-y-2 p-4">
                 <button class="theme-toggle" onclick="toggleTheme()" id="themeToggleBtn">
                     <i class="fas fa-sun"></i> Light Mode
                 </button>
-                <a href="/admin" style="text-decoration: none;">
-                    <button class="theme-toggle" style="color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
+                <a href="/admin" class="block">
+                    <button class="theme-toggle admin-link-btn">
                         <i class="fas fa-shield-alt"></i> Admin Dashboard
                     </button>
                 </a>
 
                 <div class="login-section" id="loginSection">
                     <div class="form-group">
+                        <label class="field-label">User ID</label>
                         <input type="text" id="userId" value="STU-0001" placeholder="e.g. STU-0001">
                     </div>
                     <div class="form-group">
+                        <label class="field-label">Role</label>
                         <select id="userRole" onchange="updateDefaultId()">
                             <option value="student">Student</option>
                             <option value="faculty">Faculty</option>
@@ -72,10 +103,11 @@
                 <button class="menu-btn" onclick="toggleSidebar()"><i class="fas fa-bars"></i></button>
                 <div class="header-title">
                     <h2>TAIA <span>Auto-Router</span></h2>
+                    <p class="header-subtitle">Academic Intelligence Assistant</p>
                 </div>
             </div>
-            
-            <div class="messages" id="messages">
+
+            <div class="messages" id="chat-messages">
                 <div class="welcome-msg">
                     <div class="logo-large">
                         <i class="fas fa-graduation-cap"></i>
@@ -87,7 +119,7 @@
 
             <div class="input-area">
                 <div class="input-container">
-                    <div class="input-wrapper">
+                    <div class="input-wrapper bg-[var(--bg-input)] border border-[var(--border-color)]">
                         <textarea id="msgInput" placeholder="Message TAIA..." onkeydown="handleKeydown(event)" disabled rows="1"></textarea>
                         <button class="btn-send" onclick="sendMessage()" id="sendBtn" disabled>
                             <i class="fas fa-paper-plane"></i>
@@ -100,8 +132,14 @@
             </div>
         </main>
     </div>
-    <script src="{{ url_for('static', filename='app.js') }}?v=2"></script>
+    <script>
+        window.TAIA_CONFIG = {
+            AI_API_URL: {{ taia_ai_url | tojson }},
+            ERP_API_URL: {{ taia_erp_url | tojson }}
+        };
+    </script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=10"></script>
     <div id="widget-root"></div>
-    <script type="module" crossorigin src="{{ url_for('static', filename='index-Bmp0inQ4.js') }}"></script>
+    <script type="module" src="{{ url_for('static', filename='widget.js') }}"></script>
 </body>
 </html>

@@ -1,0 +1,10 @@
+{
+  "name": "taia-dev",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n ui,ai,erp -c blue,green,yellow \"python ui_app/app.py\" \"uvicorn app.main:app --reload --host 127.0.0.1 --port 8000\" \"uvicorn mock_erp.main:app --reload --host 127.0.0.1 --port 8801\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

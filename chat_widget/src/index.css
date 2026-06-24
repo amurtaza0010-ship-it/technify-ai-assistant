@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  #widget-root {
+    font-family: Inter, system-ui, -apple-system, sans-serif;
+  }
+}
+
+@layer components {
+  .markdown-content strong {
+    @apply font-semibold;
+  }
+
+  .markdown-content ul {
+    @apply my-2 list-disc pl-5;
+  }
+
+  .markdown-content ol {
+    @apply my-2 list-decimal pl-5;
+  }
+
+  .markdown-content p {
+    @apply mb-2 last:mb-0;
+  }
+
+  .markdown-content table {
+    @apply my-2 w-full border-collapse text-xs;
+  }
+
+  .markdown-content th,
+  .markdown-content td {
+    @apply border border-slate-200 px-2 py-1 text-left;
+  }
+
+  .markdown-content th {
+    @apply bg-slate-50 font-medium;
+  }
+
+  .markdown-content code {
+    @apply rounded bg-slate-100 px-1 py-0.5 text-xs;
+  }
+}

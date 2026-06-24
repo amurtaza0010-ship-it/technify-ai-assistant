@@ -4,157 +4,25 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TAIA | Admin Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: { brand: { 500: '#10A37F', 600: '#0d8f6e' } }
+                }
+            }
+        }
+    </script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
-        .dashboard-area {
-            flex-grow: 1;
-            display: flex;
-            flex-direction: column;
-            background-color: var(--bg-main);
-            padding: 2rem;
-            overflow-y: auto;
-        }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1.5rem;
-            margin-bottom: 2rem;
-        }
-        .stat-card {
-            background-color: var(--bg-input);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 1.5rem;
-            text-align: center;
-            box-shadow: var(--shadow);
-        }
-        .stat-card h3 {
-            font-size: 0.9rem;
-            color: var(--text-secondary);
-            margin-bottom: 0.5rem;
-            font-weight: 500;
-        }
-        .stat-card p {
-            font-size: 2rem;
-            font-weight: 600;
-            color: var(--text-primary);
-        }
-        .table-container {
-            background-color: var(--bg-input);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: var(--shadow);
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            text-align: left;
-            color: var(--text-primary);
-        }
-        th, td {
-            padding: 1rem;
-            border-bottom: 1px solid var(--border-color);
-        }
-        th {
-            background-color: var(--bg-hover);
-            font-weight: 500;
-            color: var(--text-secondary);
-            font-size: 0.85rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-        tr:last-child td {
-            border-bottom: none;
-        }
-        .refresh-btn {
-            background-color: var(--btn-primary);
-            color: white;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
-            cursor: pointer;
-            font-family: inherit;
-            font-weight: 500;
-            transition: all 0.2s;
-        }
-        .refresh-btn:hover {
-            background-color: var(--btn-primary-hover);
-        }
-        .dashboard-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 2rem;
-        }
-        .badge {
-            background-color: #ef4444;
-            color: white;
-            padding: 2px 6px;
-            border-radius: 12px;
-            font-size: 12px;
-        }
-        .admin-panel-title {
-            font-size: 1.1rem;
-            font-weight: 600;
-            color: var(--text-primary);
-            padding: 12px 8px 8px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .sidebar-nav {
-            margin-top: 12px;
-            padding: 0 4px;
-        }
-        .sidebar-nav a {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 10px 12px;
-            border-radius: 6px;
-            color: var(--text-primary);
-            text-decoration: none;
-            font-size: 14px;
-            margin-bottom: 4px;
-        }
-        .sidebar-nav a:hover,
-        .sidebar-nav a.active {
-            background: var(--bg-hover);
-        }
-        .admin-login-panel {
-            max-width: 420px;
-            margin: 2rem auto;
-            padding: 2rem;
-            background: var(--bg-input);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            box-shadow: var(--shadow);
-        }
-        .admin-login-panel h2 {
-            color: var(--text-primary);
-            margin-bottom: 0.5rem;
-        }
-        .admin-login-panel p {
-            color: var(--text-secondary);
-            margin-bottom: 1.5rem;
-            font-size: 14px;
-        }
-        .login-error {
-            display: none;
-            color: #ef4444;
-            font-size: 13px;
-            margin-top: 10px;
-        }
-    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <div class="app">
-        <!-- Sidebar -->
         <aside class="sidebar" id="sidebar">
-            <div class="sidebar-top">
+            <div class="sidebar-top space-y-4 p-4">
                 <div class="admin-panel-title">
                     <i class="fas fa-shield-alt" style="color: #ef4444;"></i>
                     <span id="sidebarTitle">Admin Panel</span>
@@ -176,11 +44,11 @@
                 </nav>
             </div>
 
-            <div class="sidebar-bottom">
+            <div class="sidebar-bottom space-y-2 p-4">
                 <button class="theme-toggle" onclick="toggleTheme()" id="themeToggleBtn">
                     <i class="fas fa-sun"></i> Light Mode
                 </button>
-                <a href="/" style="text-decoration: none;">
+                <a href="/" class="block">
                     <button class="new-chat-btn">
                         <i class="fas fa-arrow-left"></i> Back to Chat
                     </button>
@@ -191,18 +59,17 @@
             </div>
         </aside>
 
-        <!-- Main Dashboard Area -->
         <main class="dashboard-area">
             <div id="adminLoginPanel" class="admin-login-panel">
                 <h2><i class="fas fa-lock"></i> Admin Sign In</h2>
-                <p>Sign in to access audit logs. Uses the Mock ERP on port 8001.</p>
+                <p>Sign in to access audit logs and analytics. Uses the Mock ERP on port 8001.</p>
                 <form onsubmit="handleAdminLogin(event)">
                     <div class="form-group">
-                        <label for="adminEmail" style="font-size: 13px; color: var(--text-secondary);">Email</label>
+                        <label class="field-label" for="adminEmail">Email</label>
                         <input type="email" id="adminEmail" value="admin@technify.edu" placeholder="admin@technify.edu" required>
                     </div>
                     <div class="form-group">
-                        <label for="adminPassword" style="font-size: 13px; color: var(--text-secondary);">Password</label>
+                        <label class="field-label" for="adminPassword">Password</label>
                         <input type="password" id="adminPassword" placeholder="Password" required>
                     </div>
                     <button type="submit" class="btn-login" id="adminLoginBtn">
@@ -215,21 +82,61 @@
             <div id="dashboardContent" style="display: none;">
                 <div class="dashboard-header">
                     <div>
-                        <h1 style="color: var(--text-primary);">Audit Logs Dashboard</h1>
-                        <p style="color: var(--text-secondary); margin-top: 0.5rem;">View system queries and latency metrics</p>
+                        <h1 style="color: var(--text-primary); font-size: 1.5rem; font-weight: 700;">Audit Logs Dashboard</h1>
+                        <p style="color: var(--text-secondary); margin-top: 0.35rem; font-size: 14px;">System queries, latency metrics, and intent analytics</p>
                     </div>
-                    <button class="refresh-btn" onclick="fetchLogs()">🔄 Refresh Logs</button>
+                    <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                        <span class="auto-refresh-badge">
+                            <span class="dot"></span>
+                            Auto-refresh: 15s
+                        </span>
+                        <button class="refresh-btn secondary" onclick="fetchLogs()" type="button">
+                            <i class="fas fa-sync-alt"></i> Refresh Now
+                        </button>
+                    </div>
                 </div>
 
                 <div class="stats-grid">
-                    <div class="stat-card">
-                        <h3>Total Queries (Limit 50)</h3>
+                    <div class="stat-card stat-card-compact">
+                        <h3>Total Queries</h3>
                         <p id="totalQueries">-</p>
                     </div>
-                    <div class="stat-card">
+                    <div class="stat-card stat-card-compact">
                         <h3>Avg Latency (s)</h3>
                         <p id="avgLatency">-</p>
                     </div>
+                    <div class="stat-card stat-card-compact">
+                        <h3>Filtered Results</h3>
+                        <p id="filteredCount">-</p>
+                    </div>
+                </div>
+
+                <div class="charts-grid">
+                    <div class="chart-card chart-card-compact">
+                        <h3><i class="fas fa-chart-line" style="color: var(--btn-primary);"></i> Latency — Last 10</h3>
+                        <div class="chart-wrap chart-wrap-compact" id="latencyChartWrap" style="display: none;">
+                            <canvas id="latencyChart"></canvas>
+                        </div>
+                        <div class="chart-empty" id="latencyChartEmpty">Waiting for data...</div>
+                    </div>
+                    <div class="chart-card chart-card-compact">
+                        <h3><i class="fas fa-chart-pie" style="color: #6366f1;"></i> Intent Distribution</h3>
+                        <div class="chart-wrap chart-wrap-compact" id="intentChartWrap" style="display: none;">
+                            <canvas id="intentChart"></canvas>
+                        </div>
+                        <div class="chart-empty" id="intentChartEmpty">Waiting for data...</div>
+                    </div>
+                </div>
+
+                <div class="filter-bar">
+                    <input type="text" id="filterUserId" placeholder="Filter by User ID (e.g. STU-0001)" oninput="applyFilters()">
+                    <input type="text" id="filterIntent" placeholder="Filter by Intent (e.g. gpa)" oninput="applyFilters()">
+                    <select id="filterRole" onchange="applyFilters()">
+                        <option value="">All Roles</option>
+                        <option value="student">Student</option>
+                        <option value="faculty">Faculty</option>
+                        <option value="admin">Admin</option>
+                    </select>
                 </div>
 
                 <div class="table-container">
@@ -246,7 +153,7 @@
                         </thead>
                         <tbody id="logsTableBody">
                             <tr>
-                                <td colspan="6" style="text-align: center; color: var(--text-secondary);">Click 'Refresh Logs' to load data</td>
+                                <td colspan="6" style="text-align: center; color: var(--text-secondary);">Sign in to load audit logs</td>
                             </tr>
                         </tbody>
                     </table>
@@ -254,6 +161,12 @@
             </div>
         </main>
     </div>
-    <script src="{{ url_for('static', filename='admin.js') }}"></script>
+    <script>
+        window.TAIA_CONFIG = {
+            AI_API_URL: {{ taia_ai_url | tojson }},
+            ERP_API_URL: {{ taia_erp_url | tojson }}
+        };
+    </script>
+    <script src="{{ url_for('static', filename='admin.js') }}?v=4"></script>
 </body>
 </html>

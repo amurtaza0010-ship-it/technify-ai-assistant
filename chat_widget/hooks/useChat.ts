@@ -15,7 +15,7 @@ interface UseChatReturn {
 
 const CHAT_API_URL = import.meta.env.DEV
   ? "/api/v1/chat"
-  : "http://localhost:8000/api/v1/chat";
+  : (import.meta.env.VITE_TAIA_API_URL || "http://127.0.0.1:8000") + "/api/v1/chat";
 
 function getAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {

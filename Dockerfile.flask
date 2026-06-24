@@ -16,10 +16,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir flask
+RUN pip install --no-cache-dir flask python-dotenv
 
 COPY ui_app/ ./ui_app/
-COPY --from=widget-builder /app/chat_widget/dist/assets/ ./ui_app/static/
+COPY --from=widget-builder /app/chat_widget/dist/widget.js ./ui_app/static/
+COPY --from=widget-builder /app/chat_widget/dist/widget.css ./ui_app/static/
 
 EXPOSE 5000
 

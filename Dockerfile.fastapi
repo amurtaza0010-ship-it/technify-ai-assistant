@@ -4,7 +4,8 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     APP_HOST=0.0.0.0 \
-    APP_PORT=8000
+    APP_PORT=8000 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -15,8 +16,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements.txt
+
+# Upgrade pip tooling (small layer; improves download reliability)
+RUN pip --retries 10 install --no-cache-dir --default-timeout=200 \
+    --upgrade pip setuptools wheel
+
+# Split heavy downloads into separate layers so one timeout does not fail the whole build
+RUN pip --retries 10 install --no-cache-dir --default-timeout=200 \
+    torch --index-url https://download.pytorch.org/whl/cpu
+
+RUN pip --retries 10 install --no-cache-dir --default-timeout=200 numpy
+
+RUN pip --retries 10 install --no-cache-dir --default-timeout=200 onnxruntime
+
+RUN pip --retries 10 install --no-cache-dir --default-timeout=200 chromadb
+
+RUN pip --retries 10 install --no-cache-dir --default-timeout=200 sentence-transformers
+
+# Remaining deps; already-installed packages are skipped when versions match
+RUN pip --retries 10 install --no-cache-dir --default-timeout=200 -r requirements.txt
 
 COPY app/ ./app/
 COPY data/ ./data/

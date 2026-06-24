@@ -86,7 +86,7 @@ def verify_user_access(
     Mode 1 JWT Token (production)
     Mode 2 Simple Headers (development fallback)
     """
-    print(f"\n[DEBUG] SECURITY CHECK TRIGGERED! Auth Header: {authorization}\n")
+    logger.debug("Auth check: authorization=%s", bool(authorization))
 
     # Mode 1: JWT Token validation
     if authorization and authorization.startswith("Bearer "):

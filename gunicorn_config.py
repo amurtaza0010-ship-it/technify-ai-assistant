@@ -13,7 +13,7 @@ bind = f"{os.getenv('APP_HOST', '0.0.0.0')}:{os.getenv('APP_PORT', '8000')}"
 # ---- Worker processes ----
 # Standard formula: (2 x CPU cores) + 1, capped at 4 so small
 # instances/containers don't get over-subscribed.
-workers = int(os.getenv("GUNICORN_WORKERS", min(multiprocessing.cpu_count() * 2 + 1, 4)))
+workers = int(os.getenv("GUNICORN_WORKERS", "1"))
 worker_class = "uvicorn.workers.UvicornWorker"
 worker_connections = 1000
 threads = 1
@@ -26,11 +26,11 @@ graceful_timeout = 30
 keepalive = 5
 
 # ---- Reliability ----
-# Recycle workers periodically to guard against memory growth
-# from LangChain / ChromaDB / embedding models over time.
-max_requests = 1000
-max_requests_jitter = 100
-preload_app = True
+# Do not recycle workers: each new worker reloads HuggingFace embeddings (~15s).
+max_requests = 0
+max_requests_jitter = 0
+# Embeddings/Chroma must initialize per worker via FastAPI lifespan warmup.
+preload_app = False
 
 # ---- Logging ----
 accesslog = "-"   # stdout (captured by `docker logs`)
