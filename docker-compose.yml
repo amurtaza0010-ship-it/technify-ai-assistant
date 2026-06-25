@@ -12,6 +12,12 @@ services:
       - .env
     networks:
       - taia_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
@@ -43,6 +49,12 @@ services:
       - redis
     networks:
       - taia_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
 
   flask:
     build:
@@ -56,8 +68,10 @@ services:
     environment:
       ERP_API_BASE_URL: http://erp:8001/api/v1
     depends_on:
-      - erp
-      - fastapi
+      erp:
+        condition: service_healthy
+      fastapi:
+        condition: service_healthy
     networks:
       - taia_network
 

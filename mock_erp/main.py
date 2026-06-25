@@ -42,3 +42,8 @@ def preload_mock_erp_data():
 @app.get("/")
 def root():
     return {"service": "Mock Technify ERP", "status": "running"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}

@@ -425,9 +425,26 @@ async function sendMessage() {
         await streamResponse(msg, typing);
     } catch (e) {
         typing.remove();
-        try {
-            await normalResponse(msg);
-        } catch (fallbackErr) {
+        let success = false;
+        for (let attempt = 1; attempt <= 4; attempt++) {
+            await new Promise(res => setTimeout(res, 1500 * attempt));
+            const retryTyping = showTyping();
+            try {
+                await streamResponse(msg, retryTyping);
+                success = true;
+                break;
+            } catch (_) {
+                retryTyping.remove();
+                try {
+                    await normalResponse(msg);
+                    success = true;
+                    break;
+                } catch (__) {
+                    // next attempt
+                }
+            }
+        }
+        if (!success) {
             addMsg('assistant', `**Connection Error:** Make sure all three services are running.\n\nUI: \`python ui_app/app.py\` (port 5000)\nAI Service: \`uvicorn app.main:app --reload --host 127.0.0.1 --port 8000\`\nMock ERP: \`uvicorn mock_erp.main:app --reload --host 127.0.0.1 --port 8801\`\n\nOr run \`npm run dev\` from the project root.`);
         }
     }
