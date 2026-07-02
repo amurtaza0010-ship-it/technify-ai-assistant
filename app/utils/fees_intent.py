@@ -62,6 +62,12 @@ def is_finance_scholarship_query(message: str) -> bool:
     return bool(_SCHOLARSHIP_QUERY_PATTERN.search(message or ""))
 
 
+def is_pending_fee_query(message: str) -> bool:
+    """Finance/admin query listing students with pending or unpaid fees."""
+    lower = (message or "").lower()
+    return bool(re.search(r"pending fees?|unpaid fees?|students with pending", lower))
+
+
 def is_fee_erp_intent(intent: str, role: str = "", message: str = "") -> bool:
     """True when the intent (after fees resolution) targets fee ERP data, not RAG policy."""
     from app.utils.intent_routing import resolve_role_intent

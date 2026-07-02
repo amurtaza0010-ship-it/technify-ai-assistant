@@ -199,6 +199,11 @@ def normalize_role(role: str) -> str:
 
 
 def is_cross_student_at_risk_query(message: str) -> bool:
+    from app.utils.fees_intent import is_pending_fee_query
+
+    if is_pending_fee_query(message):
+        return False
+
     lower = message.lower().strip()
     if any(re.search(p, lower) for p in _CROSS_STUDENT_AT_RISK_PATTERNS):
         if re.search(r"\bmy\b", lower) and not re.search(r"\b(which|other|all|how many) students?\b", lower):
@@ -240,13 +245,17 @@ def is_department_stats_query(message: str) -> bool:
 
 def intent_to_endpoint_type(intent: str, message: str = "") -> Optional[str]:
     """Map intent (and message heuristics) to an RBAC endpoint category."""
+    intent_lower = (intent or "").lower().strip()
+    # Pending-fee lists are admin/finance data — not faculty-only academic queries.
+    if intent_lower == "admin_finance_pending":
+        return INTENT_TO_ENDPOINT_TYPE.get(intent_lower)
     if is_department_stats_query(message):
         return "faculty_only"
     if is_cross_student_at_risk_query(message):
         return "faculty_only"
     if is_peers_gpa_query(message):
         return "faculty_only"
-    return INTENT_TO_ENDPOINT_TYPE.get((intent or "").lower().strip())
+    return INTENT_TO_ENDPOINT_TYPE.get(intent_lower)
 
 
 def is_role_allowed_for_endpoint(
