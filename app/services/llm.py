@@ -8,6 +8,8 @@ import logging
 
 import os
 
+import re
+
 import time
 
 from collections.abc import AsyncIterator
@@ -196,7 +198,7 @@ def get_llm(
 
         "streaming": streaming,
 
-        "max_retries": 1,
+        "max_retries": 0,
 
         "timeout": 30.0,
 
@@ -218,25 +220,51 @@ def get_llm(
 
 
 
-def is_llm_auth_error(error: Exception) -> bool:
+def _iter_error_chain(error: BaseException):
 
-    message = str(error).lower()
+    seen: set[int] = set()
+
+    current: BaseException | None = error
+
+    while current is not None and id(current) not in seen:
+
+        seen.add(id(current))
+
+        yield current
+
+        current = current.__cause__ or current.__context__
+
+
+
+
+
+def _message_indicates_rate_limit(message: str) -> bool:
+
+    lower = message.lower()
+
+    if re.search(r"\b429\b", lower):
+
+        return True
 
     return any(
 
-        phrase in message
+        phrase in lower
 
         for phrase in (
 
-            "missing authentication",
+            "rate limit",
 
-            "401",
+            "rate_limit",
 
-            "unauthorized",
+            "rate_limit_exceeded",
 
-            "invalid api key",
+            "ratelimiterror",
 
-            "authentication error",
+            "tokens per minute",
+
+            "tokens per minute exceeded",
+
+            "too many requests",
 
         )
 
@@ -248,15 +276,27 @@ def is_llm_auth_error(error: Exception) -> bool:
 
 def is_rate_limit_error(error: Exception) -> bool:
 
-    """Detect Groq/OpenAI rate limits (HTTP 429) including Groq RateLimitError."""
+    """Detect rate limits anywhere in the exception chain (for outer handlers)."""
 
-    if is_llm_auth_error(error):
-
-        return False
+    return any(_exception_indicates_rate_limit(exc) for exc in _iter_error_chain(error))
 
 
 
-    exc_name = type(error).__name__.lower()
+
+
+def is_direct_rate_limit_error(error: Exception) -> bool:
+
+    """Detect rate limits on this exception only (ignore chained primary 429)."""
+
+    return _exception_indicates_rate_limit(error)
+
+
+
+
+
+def _exception_indicates_rate_limit(exc: BaseException) -> bool:
+
+    exc_name = type(exc).__name__.lower()
 
     if "ratelimit" in exc_name:
 
@@ -264,7 +304,7 @@ def is_rate_limit_error(error: Exception) -> bool:
 
 
 
-    status_code = getattr(error, "status_code", None)
+    status_code = getattr(exc, "status_code", None)
 
     if status_code == 429:
 
@@ -272,53 +312,325 @@ def is_rate_limit_error(error: Exception) -> bool:
 
 
 
-    response = getattr(error, "response", None)
+    response = getattr(exc, "response", None)
 
-    if response is not None and getattr(response, "status_code", None) == 429:
+    if response is not None:
 
-        return True
+        response_status = getattr(response, "status_code", None)
+
+        if response_status == 429:
+
+            return True
+
+        try:
+
+            body = response.json()
+
+            error_code = (body.get("error") or {}).get("code", "")
+
+            if error_code == "rate_limit_exceeded":
+
+                return True
+
+        except Exception:
+
+            pass
+
+
+
+    return _message_indicates_rate_limit(str(exc))
+
+
+
+
+
+def _configured_model_chain() -> list[str]:
+
+    models: list[str] = []
+
+    for model in (PRIMARY_MODEL, FALLBACK_MODEL):
+
+        if model and model not in models:
+
+            models.append(model)
+
+    return models
+
+
+
+
+
+def _max_tokens_for_chain_index(index: int) -> int | None:
+
+    return _FALLBACK_MAX_TOKENS if index > 0 else None
+
+
+
+
+
+def is_llm_auth_error(error: Exception) -> bool:
+
+    if is_rate_limit_error(error):
+
+        return False
 
 
 
     message = str(error).lower()
 
-    if any(
+    if _message_indicates_rate_limit(message):
+
+        return False
+
+
+
+    return any(
 
         phrase in message
 
         for phrase in (
 
-            "429",
+            "missing authentication",
 
-            "rate limit",
+            "unauthorized",
 
-            "rate_limit",
+            "invalid api key",
 
-            "ratelimiterror",
-
-            "tokens per day",
-
-            "tpm",
-
-            "too many requests",
+            "authentication error",
 
         )
 
-    ):
-
-        return True
+    ) or bool(re.search(r"(?:error code:\s*401|\b401 unauthorized\b)", message))
 
 
 
-    # Treat Groq 520 server errors as transient — fall through to fallback model
-
-    if status_code == 520 or "520" in message:
-
-        return True
 
 
+def _chunk_text(content) -> str:
 
-    return False
+    if isinstance(content, str):
+
+        return content
+
+    if isinstance(content, list):
+
+        parts = []
+
+        for item in content:
+
+            if isinstance(item, dict):
+
+                parts.append(str(item.get("text", "")))
+
+            elif item:
+
+                parts.append(str(item))
+
+        return "".join(parts)
+
+    return str(content) if content else ""
+
+
+
+
+
+async def ainvoke_fallback_only(messages: Sequence[BaseMessage]) -> BaseMessage:
+
+    """Invoke configured fallback model(s) directly."""
+
+    models = _configured_model_chain()
+
+    if len(models) <= 1:
+
+        return await ainvoke_llm_with_fallback(messages)
+
+    return await _ainvoke_model_chain(messages, models[1:])
+
+
+
+
+
+async def astream_fallback_only(
+
+    messages: Sequence[BaseMessage],
+
+) -> AsyncIterator[str]:
+
+    """Stream configured fallback model(s) directly."""
+
+    models = _configured_model_chain()
+
+    if len(models) <= 1:
+
+        async for chunk in astream_llm_with_fallback(messages):
+
+            yield chunk
+
+        return
+
+    async for chunk in _astream_model_chain(messages, models[1:]):
+
+        yield chunk
+
+
+
+
+
+async def _ainvoke_model_chain(
+
+    messages: Sequence[BaseMessage],
+
+    models: list[str],
+
+) -> BaseMessage:
+
+    for index, model in enumerate(models):
+
+        t0 = time.perf_counter()
+
+        llm = get_llm(model=model, max_tokens=_FALLBACK_MAX_TOKENS)
+
+        try:
+
+            result = await llm.ainvoke(messages)
+
+            logger.info("Fallback model succeeded.")
+
+            logger.info(
+
+                "LLM fallback %s → %.2fs",
+
+                model,
+
+                time.perf_counter() - t0,
+
+            )
+
+            return result
+
+        except Exception as exc:
+
+            if not is_direct_rate_limit_error(exc):
+
+                logger.warning(
+
+                    "LLM %s failed (non-rate-limit) after %.2fs: %s",
+
+                    model,
+
+                    time.perf_counter() - t0,
+
+                    exc,
+
+                )
+
+                raise
+
+            if index < len(models) - 1:
+
+                logger.warning(
+
+                    "Primary model rate limited. Switching to fallback model.",
+
+                )
+
+                continue
+
+            logger.warning("Fallback model failed. Returning busy message.")
+
+            return AIMessage(content=LLM_RATE_LIMIT_BUSY)
+
+    logger.warning("Fallback model failed. Returning busy message.")
+
+    return AIMessage(content=LLM_RATE_LIMIT_BUSY)
+
+
+
+
+
+async def _astream_model_chain(
+
+    messages: Sequence[BaseMessage],
+
+    models: list[str],
+
+) -> AsyncIterator[str]:
+
+    for index, model in enumerate(models):
+
+        t0 = time.perf_counter()
+
+        llm = get_llm(
+
+            model=model,
+
+            max_tokens=_FALLBACK_MAX_TOKENS,
+
+            streaming=True,
+
+        )
+
+        try:
+
+            async for chunk in llm.astream(messages):
+
+                text = _chunk_text(chunk.content)
+
+                if text:
+
+                    yield text
+
+            logger.info("Fallback model succeeded.")
+
+            logger.info(
+
+                "LLM stream fallback %s → %.2fs",
+
+                model,
+
+                time.perf_counter() - t0,
+
+            )
+
+            return
+
+        except Exception as exc:
+
+            if not is_direct_rate_limit_error(exc):
+
+                logger.warning(
+
+                    "LLM stream %s failed (non-rate-limit) after %.2fs: %s",
+
+                    model,
+
+                    time.perf_counter() - t0,
+
+                    exc,
+
+                )
+
+                raise
+
+            if index < len(models) - 1:
+
+                logger.warning(
+
+                    "Primary model rate limited. Switching to fallback model.",
+
+                )
+
+                continue
+
+            logger.warning("Fallback model failed. Returning busy message.")
+
+            yield LLM_RATE_LIMIT_BUSY
+
+            return
+
+    logger.warning("Fallback model failed. Returning busy message.")
+
+    yield LLM_RATE_LIMIT_BUSY
 
 
 
@@ -388,111 +700,89 @@ async def ainvoke_llm_with_fallback(messages: Sequence[BaseMessage]) -> BaseMess
 
     """
 
-    Invoke PRIMARY_MODEL; on 429, retry once with FALLBACK_MODEL.
+    Invoke configured models in order. On direct HTTP 429 for a model, try the next.
 
-    If both are rate-limited, return a friendly busy message (no raw 429).
+    Return LLM_RATE_LIMIT_BUSY only after every configured model is rate limited.
 
     """
 
-    temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
+    models = _configured_model_chain()
 
-    primary = get_llm(model=PRIMARY_MODEL)
+    for index, model in enumerate(models):
 
-    t0 = time.perf_counter()
+        t0 = time.perf_counter()
 
-
-
-    try:
-
-        result = await primary.ainvoke(messages)
-
-        logger.info(
-
-            "LLM primary %s → %.2fs",
-
-            PRIMARY_MODEL,
-
-            time.perf_counter() - t0,
-
-        )
-
-        return result
-
-    except Exception as primary_exc:
-
-        elapsed = time.perf_counter() - t0
-
-        if not is_rate_limit_error(primary_exc):
-
-            logger.warning(
-
-                "LLM primary %s failed (non-rate-limit) after %.2fs: %s",
-
-                PRIMARY_MODEL,
-
-                elapsed,
-
-                primary_exc,
-
-            )
-
-            raise
-
-
-
-        logger.warning(
-
-            "LLM primary rate limited (%s) after %.2fs — retrying with %s (reason: HTTP 429 / rate limit)",
-
-            PRIMARY_MODEL,
-
-            elapsed,
-
-            FALLBACK_MODEL,
-
-        )
-
-
-
-        fallback = get_llm(model=FALLBACK_MODEL, max_tokens=_FALLBACK_MAX_TOKENS)
-
-        t1 = time.perf_counter()
+        llm = get_llm(model=model, max_tokens=_max_tokens_for_chain_index(index))
 
         try:
 
-            result = await fallback.ainvoke(messages)
+            result = await llm.ainvoke(messages)
 
-            logger.info(
+            if index == 0:
 
-                "LLM fallback %s → %.2fs (triggered by primary rate limit)",
+                logger.info(
 
-                FALLBACK_MODEL,
+                    "LLM primary %s → %.2fs",
 
-                time.perf_counter() - t1,
+                    model,
 
-            )
-
-            return result
-
-        except Exception as fallback_exc:
-
-            fb_elapsed = time.perf_counter() - t1
-
-            if is_rate_limit_error(fallback_exc):
-
-                logger.warning(
-
-                    "Fallback LLM also rate limited (%s) after %.2fs; returning busy message",
-
-                    FALLBACK_MODEL,
-
-                    fb_elapsed,
+                    time.perf_counter() - t0,
 
                 )
 
-                return AIMessage(content=LLM_RATE_LIMIT_BUSY)
+            else:
 
-            raise
+                logger.info("Fallback model succeeded.")
+
+                logger.info(
+
+                    "LLM fallback %s → %.2fs",
+
+                    model,
+
+                    time.perf_counter() - t0,
+
+                )
+
+            return result
+
+        except Exception as exc:
+
+            elapsed = time.perf_counter() - t0
+
+            if not is_direct_rate_limit_error(exc):
+
+                logger.warning(
+
+                    "LLM %s failed (non-rate-limit) after %.2fs: %s",
+
+                    model,
+
+                    elapsed,
+
+                    exc,
+
+                )
+
+                raise
+
+            if index < len(models) - 1:
+
+                logger.warning(
+
+                    "Primary model rate limited. Switching to fallback model.",
+
+                )
+
+                continue
+
+            logger.warning("Fallback model failed. Returning busy message.")
+
+            return AIMessage(content=LLM_RATE_LIMIT_BUSY)
+
+    logger.warning("Fallback model failed. Returning busy message.")
+
+    return AIMessage(content=LLM_RATE_LIMIT_BUSY)
 
 
 
@@ -506,123 +796,105 @@ async def astream_llm_with_fallback(
 
     """
 
-    Stream PRIMARY_MODEL token chunks; on 429, retry once with FALLBACK_MODEL.
+    Stream configured models in order. On direct HTTP 429, continue with fallback stream.
 
-    If both are rate-limited, yield the friendly busy message once.
+    Yield LLM_RATE_LIMIT_BUSY only after every configured model is rate limited.
 
     """
 
-    temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
+    models = _configured_model_chain()
 
-    primary = get_llm(model=PRIMARY_MODEL, streaming=True)
+    for index, model in enumerate(models):
 
-    t0 = time.perf_counter()
+        t0 = time.perf_counter()
 
+        llm = get_llm(
 
+            model=model,
 
-    try:
-
-        async for chunk in primary.astream(messages):
-
-            if chunk.content:
-
-                yield chunk.content
-
-        logger.info(
-
-            "LLM stream primary %s → %.2fs",
-
-            PRIMARY_MODEL,
-
-            time.perf_counter() - t0,
-
-        )
-
-        return
-
-    except Exception as primary_exc:
-
-        elapsed = time.perf_counter() - t0
-
-        if not is_rate_limit_error(primary_exc):
-
-            logger.warning(
-
-                "LLM stream primary %s failed (non-rate-limit) after %.2fs: %s",
-
-                PRIMARY_MODEL,
-
-                elapsed,
-
-                primary_exc,
-
-            )
-
-            raise
-
-
-
-        logger.warning(
-
-            "LLM stream primary rate limited (%s) after %.2fs — retrying with %s",
-
-            PRIMARY_MODEL,
-
-            elapsed,
-
-            FALLBACK_MODEL,
-
-        )
-
-
-
-        fallback = get_llm(
-
-            model=FALLBACK_MODEL,
-
-            max_tokens=_FALLBACK_MAX_TOKENS,
+            max_tokens=_max_tokens_for_chain_index(index),
 
             streaming=True,
 
         )
 
-        t1 = time.perf_counter()
-
         try:
 
-            async for chunk in fallback.astream(messages):
+            async for chunk in llm.astream(messages):
 
-                if chunk.content:
+                text = _chunk_text(chunk.content)
 
-                    yield chunk.content
+                if text:
 
-            logger.info(
+                    yield text
 
-                "LLM stream fallback %s → %.2fs (triggered by primary rate limit)",
+            if index == 0:
 
-                FALLBACK_MODEL,
+                logger.info(
 
-                time.perf_counter() - t1,
+                    "LLM stream primary %s → %.2fs",
 
-            )
+                    model,
 
-        except Exception as fallback_exc:
-
-            if is_rate_limit_error(fallback_exc):
-
-                logger.warning(
-
-                    "Fallback LLM stream also rate limited (%s); yielding busy message",
-
-                    FALLBACK_MODEL,
+                    time.perf_counter() - t0,
 
                 )
 
-                yield LLM_RATE_LIMIT_BUSY
-
             else:
 
+                logger.info("Fallback model succeeded.")
+
+                logger.info(
+
+                    "LLM stream fallback %s → %.2fs",
+
+                    model,
+
+                    time.perf_counter() - t0,
+
+                )
+
+            return
+
+        except Exception as exc:
+
+            elapsed = time.perf_counter() - t0
+
+            if not is_direct_rate_limit_error(exc):
+
+                logger.warning(
+
+                    "LLM stream %s failed (non-rate-limit) after %.2fs: %s",
+
+                    model,
+
+                    elapsed,
+
+                    exc,
+
+                )
+
                 raise
+
+            if index < len(models) - 1:
+
+                logger.warning(
+
+                    "Primary model rate limited. Switching to fallback model.",
+
+                )
+
+                continue
+
+            logger.warning("Fallback model failed. Returning busy message.")
+
+            yield LLM_RATE_LIMIT_BUSY
+
+            return
+
+    logger.warning("Fallback model failed. Returning busy message.")
+
+    yield LLM_RATE_LIMIT_BUSY
 
 
 

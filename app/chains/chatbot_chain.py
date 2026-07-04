@@ -942,7 +942,7 @@ async def _generate_contextual_response_inner(
             import json as _json
             if data.strip().startswith(("{", "[")):
                 parsed = _json.loads(data)
-                data = _json.dumps(trim_erp_payload_for_llm(parsed, intent))
+                data = _json.dumps(trim_erp_payload_for_llm(parsed, intent, msg))
         except (ValueError, TypeError):
             pass
 
@@ -1067,7 +1067,7 @@ async def generate_contextual_response_stream(
             import json as _json
             if data.strip().startswith(("{", "[")):
                 parsed = _json.loads(data)
-                data = _json.dumps(trim_erp_payload_for_llm(parsed, intent))
+                data = _json.dumps(trim_erp_payload_for_llm(parsed, intent, msg))
         except (ValueError, TypeError):
             pass
 

@@ -23,10 +23,14 @@ _DATA_FILES = (
     "faculty",
     "courses",
     "attendance",
+    "student_attendance_summary",
     "exams",
+    "student_performance",
     "timetable",
     "assignments",
     "course_performance",
+    "course_analytics",
+    "faculty_dashboard",
     "fee_stats",
     "at_risk_students",
     "upcoming_exams",
@@ -86,6 +90,24 @@ def _build_indexes():
     for entry in timetable:
         by_student_tt[entry["student_id"]].append(entry)
     _indexes["timetable_by_student"] = dict(by_student_tt)
+
+    assignments = get_data("assignments")
+    by_faculty_assignments = defaultdict(list)
+    for assignment in assignments:
+        by_faculty_assignments[assignment.get("faculty_id", "")].append(assignment)
+    _indexes["assignments_by_faculty"] = dict(by_faculty_assignments)
+
+    attendance_summary = get_data("student_attendance_summary")
+    by_course_summary = defaultdict(list)
+    for row in attendance_summary:
+        by_course_summary[row["course_id"]].append(row)
+    _indexes["attendance_summary_by_course"] = dict(by_course_summary)
+
+    student_performance = get_data("student_performance")
+    by_course_performance = defaultdict(list)
+    for row in student_performance:
+        by_course_performance[row["course_id"]].append(row)
+    _indexes["performance_by_course"] = dict(by_course_performance)
 
     _indexes_built = True
     logger.info("Mock ERP indexes built in %.0fms", (time.perf_counter() - t0) * 1000)
@@ -310,6 +332,35 @@ def get_faculty_courses(faculty_id: str):
 @router.get("/faculty/{faculty_id}/course/{course_id}/attendance")
 def get_course_attendance(faculty_id: str, course_id: str):
     _build_indexes()
+    summary_rows = _indexes["attendance_summary_by_course"].get(course_id, [])
+    if summary_rows:
+        result = []
+        for row in summary_rows:
+            result.append({
+                "student_id": row["student_id"],
+                "student_name": row["student_name"],
+                "course_code": row.get("course_code", ""),
+                "course_name": row.get("course_name", ""),
+                "attendance_percentage": row["attendance_percentage"],
+                "total_classes": row["total_classes"],
+                "attended_classes": row["attended_classes"],
+                "absent_classes": row["absent_classes"],
+                "late_count": row["late_count"],
+                "warning_flag": row["warning_flag"],
+                "present": row["attended_classes"] - row["late_count"],
+                "absent": row["absent_classes"],
+                "late": row["late_count"],
+                "total": row["total_classes"],
+                "percentage": row["attendance_percentage"],
+            })
+        low = [s for s in result if s["percentage"] < 75]
+        return {
+            "course_id": course_id,
+            "total_students": len(result),
+            "low_attendance_students": low,
+            "all_students": result,
+        }
+
     records = _indexes["attendance_by_course"].get(course_id, [])
     students_att = {}
     for r in records:
@@ -326,6 +377,8 @@ def get_course_attendance(faculty_id: str, course_id: str):
     result = []
     for sa in students_att.values():
         sa["percentage"] = round((sa["present"] + sa["late"]*0.5) / max(sa["total"],1) * 100, 1)
+        sa["attendance_percentage"] = sa["percentage"]
+        sa["warning_flag"] = sa["percentage"] < 75
         result.append(sa)
     low = [s for s in result if s["percentage"] < 75]
     return {"course_id": course_id, "total_students": len(result), "low_attendance_students": low, "all_students": result}
@@ -343,15 +396,44 @@ def get_faculty_assignments(faculty_id: str):
 def get_course_performance():
     performance = get_data("course_performance")
     if not performance:
+        performance = get_data("course_analytics")
+    if not performance:
         raise HTTPException(404, "Course performance data not found")
-    return {"courses": performance}
+    dashboard = get_data("faculty_dashboard")
+    attendance_summary = get_data("student_attendance_summary")
+    course_attendance = {}
+    for row in attendance_summary:
+        cid = row["course_id"]
+        if cid not in course_attendance:
+            course_attendance[cid] = []
+        course_attendance[cid].append(row["attendance_percentage"])
+    enriched = []
+    for course in performance:
+        cid = course["course_id"]
+        row = dict(course)
+        if cid in course_attendance and "average_attendance" not in row:
+            row["average_attendance"] = round(
+                sum(course_attendance[cid]) / len(course_attendance[cid]), 1
+            )
+        enriched.append(row)
+    payload = {"courses": enriched}
+    if isinstance(dashboard, dict) and dashboard:
+        payload["faculty_dashboard"] = dashboard
+    return payload
 
 @router.get("/faculty/ungraded")
 def get_ungraded_count():
     assignments = get_data("assignments")
+    today = datetime.now().date()
     ungraded = [
         a for a in assignments
-        if not a.get("graded", True) or a.get("marks_obtained") is None
+        if not a.get("graded", True) or a.get("marks_obtained") is None or a.get("pending_grading")
+    ]
+    overdue = [
+        a for a in assignments
+        if not a.get("submitted")
+        and a.get("due_date")
+        and datetime.strptime(a["due_date"], "%Y-%m-%d").date() < today
     ]
     by_course = {}
     for a in ungraded:
@@ -363,14 +445,78 @@ def get_ungraded_count():
                 "ungraded_count": 0,
             }
         by_course[key]["ungraded_count"] += 1
-    return {
+    ungraded_assignments = [
+        {
+            "assignment_id": a["assignment_id"],
+            "assignment_name": a.get("assignment_name", a.get("assignment_title", "")),
+            "course": a.get("course", a.get("course_name", "")),
+            "course_id": a["course_id"],
+            "student_id": a["student_id"],
+            "student_name": a["student_name"],
+            "due_date": a.get("due_date"),
+            "submitted": a.get("submitted", False),
+            "graded": a.get("graded", False),
+            "pending_grading": a.get("pending_grading", False),
+            "missing_submission": a.get("missing_submission", False),
+            "average_marks": a.get("average_marks"),
+            "status": a.get("status"),
+        }
+        for a in ungraded[:200]
+    ]
+    dashboard = get_data("faculty_dashboard")
+    payload = {
         "total_ungraded": len(ungraded),
+        "total_overdue": len(overdue),
         "by_course": list(by_course.values()),
+        "ungraded_assignments": ungraded_assignments,
+        "overdue_assignments": [
+            {
+                "assignment_id": a["assignment_id"],
+                "assignment_name": a.get("assignment_name", a.get("assignment_title", "")),
+                "course": a.get("course", a.get("course_name", "")),
+                "student_name": a["student_name"],
+                "due_date": a.get("due_date"),
+                "status": a.get("status"),
+            }
+            for a in overdue[:100]
+        ],
     }
+    if isinstance(dashboard, dict) and dashboard:
+        payload["dashboard"] = dashboard
+    return payload
 
 @router.get("/faculty/{faculty_id}/course/{course_id}/students")
 def get_course_students(faculty_id: str, course_id: str):
     _build_indexes()
+    performance_rows = _indexes["performance_by_course"].get(course_id, [])
+    if performance_rows:
+        result = []
+        at_risk = []
+        for row in performance_rows:
+            entry = {
+                "student_id": row["student_id"],
+                "student_name": row["student_name"],
+                "quizzes": row.get("quizzes", []),
+                "midterm": row.get("midterm"),
+                "final": row.get("final"),
+                "total": row.get("total"),
+                "GPA": row.get("GPA"),
+                "current_grade": row.get("current_grade"),
+                "class_average": row.get("class_average"),
+                "avg_percentage": row.get("total"),
+                "at_risk": row.get("at_risk", False),
+                "remarks": row.get("remarks", ""),
+            }
+            result.append(entry)
+            if entry["at_risk"]:
+                at_risk.append(entry)
+        return {
+            "course_id": course_id,
+            "total_students": len(result),
+            "at_risk_students": at_risk,
+            "students": result,
+        }
+
     course_exams = _indexes["exams_by_course"].get(course_id, [])
     students = {}
     for e in course_exams:
