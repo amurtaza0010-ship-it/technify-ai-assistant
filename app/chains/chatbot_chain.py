@@ -22,6 +22,7 @@ from app.prompts.templates import ATTENDANCE_PROMPT, RESULTS_PROMPT, COURSE_PROM
 from app.services.llm import (
     LLM_CONNECTION_ERROR,
     TAIA_IDENTITY_SYSTEM,
+    _estimate_tokens,
     ainvoke_llm_with_fallback,
     astream_llm_with_fallback,
     get_llm,
@@ -74,6 +75,19 @@ Response:"""
 FACULTY_PROMPT = """Based on the following faculty data, answer the question clearly and accurately.
 Faculty Data:
 {faculty_data}
+
+Question: {question}
+
+Response:"""
+
+GRADE_CALCULATION_PROMPT = """You have the student's current grades and the university's grading policy.
+Calculate the required marks and explain your reasoning.
+
+Student Results:
+{results_data}
+
+Grading Policy:
+{policy_data}
 
 Question: {question}
 
@@ -151,15 +165,23 @@ Question: {question}
 
 Response:"""
 
+MAX_PROMPT_TOKENS = 5000
+_RAG_DOC_TRUNCATE_CHARS = 1500
+
 STUDENT_INTENTS = [
     'attendance', 'results', 'gpa', 'courses', 'timetable', 'fees',
-    'assignments', 'exams', 'study_plan', 'policy', 'profile', 'name',
+    'assignments', 'exams', 'study_plan', 'student_instructors',
+    'student_current_semester', 'student_grade_calculation',
+    'policy', 'profile', 'name',
     'ai_identity', 'greeting', 'general',
 ]
 
 FACULTY_INTENTS = [
     'faculty_attendance', 'faculty_ungraded', 'faculty_at_risk',
-    'faculty_courses', 'faculty_performance', 'department_stats',
+    'faculty_courses', 'faculty_performance', 'faculty_teaching',
+    'faculty_course_low_attendance', 'faculty_course_top_marks',
+    'faculty_missed_midterm', 'faculty_course_average_grade',
+    'department_stats',
     'policy', 'profile', 'name',
     'ai_identity', 'greeting', 'general',
 ]
@@ -168,12 +190,14 @@ ADMIN_INTENTS = [
     'admin_students', 'admin_admissions', 'admin_fees', 'admin_departments',
     'department_stats', 'admin_at_risk', 'admin_overall', 'admin_finance_department',
     'admin_finance_pending', 'admin_finance_scholarship', 'admin_finance_summary',
+    'admin_teacher_salary', 'admin_late_fees',
     'policy', 'profile', 'name', 'ai_identity', 'greeting', 'general',
 ]
 
 FINANCE_OFFICER_INTENTS = [
     'admin_fees', 'admin_finance_department', 'admin_finance_pending',
     'admin_finance_scholarship', 'admin_finance_summary',
+    'admin_teacher_salary', 'admin_late_fees',
     'policy', 'profile', 'name', 'ai_identity', 'greeting', 'general',
 ]
 
@@ -225,6 +249,16 @@ _USER_PROFILE_PATTERNS = (
     r"what's my name",
     r"my profile",
     r"what is my profile",
+)
+
+_EXTENDED_POLICY_PHRASES = (
+    "re-take a midterm",
+    "re-take the midterm",
+    "retake a midterm",
+    "medical leave",
+    "fee waiver",
+    "children of faculty",
+    "tuition waiver",
 )
 
 
@@ -327,7 +361,86 @@ def _keyword_intent(message: str, role: str) -> Optional[str]:
 def _heuristic_intent(message: str, role: str = "Student") -> Optional[str]:
     """Fast path for identity, greeting, policy, and RBAC-sensitive queries."""
     lower = message.lower().strip()
-    if is_policy_or_rules_question(message):
+    role_norm = normalize_role(role)
+    if role_norm == "faculty" and any(
+        phrase in lower
+        for phrase in (
+            "which subjects do i teach",
+            "my teaching subjects",
+            "what do i teach",
+        )
+    ):
+        return "faculty_teaching"
+    if role_norm == "student" and any(
+        phrase in lower
+        for phrase in (
+            "who teaches me",
+            "my instructors",
+            "who is my teacher",
+            "my teachers",
+        )
+    ):
+        return "student_instructors"
+    if "salary" in lower and ("teacher" in lower or "faculty" in lower):
+        return "admin_teacher_salary"
+    if "late fee" in lower and (
+        "total" in lower or "collected" in lower or "amount" in lower
+    ):
+        return "admin_late_fees"
+    if role_norm == "faculty":
+        if any(
+            phrase in lower
+            for phrase in (
+                "students with least attendance in my course",
+                "low attendance in",
+            )
+        ):
+            return "faculty_course_low_attendance"
+        if any(
+            phrase in lower
+            for phrase in (
+                "highest marks in their previous courses",
+                "top students in course",
+                "top marks in",
+            )
+        ):
+            return "faculty_course_top_marks"
+        if any(
+            phrase in lower
+            for phrase in (
+                "missed the midterm exam",
+                "missed exam last week",
+                "missed the midterm",
+            )
+        ):
+            return "faculty_missed_midterm"
+        if "average grade for the" in lower and "course" in lower:
+            return "faculty_course_average_grade"
+    if role_norm == "student":
+        if any(
+            phrase in lower
+            for phrase in ("current semester", "which semester", "what semester")
+        ):
+            return "student_current_semester"
+        if any(
+            phrase in lower
+            for phrase in (
+                "how many marks do i need",
+                "maximum grade",
+                "fail the midterm",
+                "get a b+",
+            )
+        ):
+            return "student_grade_calculation"
+    if role_norm in ("admin", "finance_officer") and (
+        "department wise fee" in lower
+        or "department-wise fee" in lower
+        or "department fee stats" in lower
+    ):
+        return "admin_finance_department"
+    if is_policy_or_rules_question(message) or any(
+        phrase in lower for phrase in _EXTENDED_POLICY_PHRASES
+    ):
         return "policy"
     kw = _keyword_intent(message, role)
     if kw:
@@ -347,6 +460,8 @@ def _heuristic_intent(message: str, role: str = "Student") -> Optional[str]:
         return "greeting"
     if _is_ai_identity_question(lower):
         return "ai_identity"
+    if role_norm == "student" and "registered courses" in lower:
+        return "courses"
     return None
 
 
@@ -446,6 +561,74 @@ def _build_system_message(
             "the user explicitly asks again."
         )
     return prompt
+
+
+def _estimate_rag_prompt_tokens(
+    policy_data: str,
+    question: str,
+    session_id: str = "",
+    user_context: Optional[dict] = None,
+) -> int:
+    """Estimate tokens for system prompt + RAG policy prompt sent to Groq."""
+    prompt = POLICY_PROMPT.format(policy_data=policy_data, question=question)
+    messages = [
+        SystemMessage(content=_build_system_message(session_id, user_context)),
+        HumanMessage(content=prompt),
+    ]
+    return _estimate_tokens(messages)
+
+
+def _trim_rag_policy_data(
+    policy_data: str,
+    question: str,
+    session_id: str = "",
+    user_context: Optional[dict] = None,
+) -> str:
+    """Trim retrieved policy documents to stay within MAX_PROMPT_TOKENS."""
+    if not policy_data or not str(policy_data).strip():
+        return policy_data
+
+    original_docs = [doc for doc in str(policy_data).split("\n\n") if doc.strip()]
+    if not original_docs:
+        return policy_data
+
+    original_count = len(original_docs)
+    docs = list(original_docs)
+
+    while (
+        len(docs) > 1
+        and _estimate_rag_prompt_tokens("\n\n".join(docs), question, session_id, user_context)
+        > MAX_PROMPT_TOKENS
+    ):
+        docs.pop()
+
+    trimmed = "\n\n".join(docs)
+    if (
+        _estimate_rag_prompt_tokens(trimmed, question, session_id, user_context)
+        > MAX_PROMPT_TOKENS
+    ):
+        docs = [doc[:_RAG_DOC_TRUNCATE_CHARS] for doc in docs]
+        trimmed = "\n\n".join(docs)
+        while (
+            docs
+            and _estimate_rag_prompt_tokens(trimmed, question, session_id, user_context)
+            > MAX_PROMPT_TOKENS
+        ):
+            if len(docs) == 1:
+                docs[0] = docs[0][: max(200, len(docs[0]) - 300)]
+            else:
+                docs = [doc[: max(200, len(doc) - 300)] for doc in docs]
+            trimmed = "\n\n".join(docs)
+
+    final_count = len(docs)
+    if final_count < original_count or trimmed != "\n\n".join(original_docs):
+        logger.info(
+            "RAG context trimmed from %s to %s documents to stay within token limit",
+            original_count,
+            final_count,
+        )
+
+    return trimmed
 
 
 def _has_prior_turns(session_id: str) -> bool:
@@ -853,6 +1036,7 @@ async def _generate_contextual_response_inner(
     elif intent == 'greeting':
         return await _generate_greeting_response(sid, msg)
     elif use_policy:
+        data = _trim_rag_policy_data(data, msg, sid, user_context)
         prompt = POLICY_PROMPT.format(policy_data=data, question=msg)
     elif intent in PROFILE_INTENTS:
         prompt = PROFILE_PROMPT.format(profile_data=profile_data, question=msg)
@@ -987,6 +1171,7 @@ async def generate_contextual_response_stream(
             yield chunk
         return
     if use_policy:
+        data = _trim_rag_policy_data(data, msg, sid, user_context)
         prompt = POLICY_PROMPT.format(policy_data=data, question=msg)
     elif intent in PROFILE_INTENTS:
         prompt = PROFILE_PROMPT.format(profile_data=profile_data, question=msg)
@@ -1024,11 +1209,25 @@ async def generate_contextual_response_stream(
         )
     elif intent.startswith("admin_") or intent == "department_stats":
         prompt = ADMIN_PROMPT.format(admin_data=data, question=msg)
+    elif intent == "faculty_at_risk":
+        prompt = FACULTY_PROMPT.format(faculty_data=data, question=msg) + (
+            "\n\nSystem instruction: List all students in the top_at_risk_students "
+            "array whose reason mentions 'Low attendance'. Use their names and "
+            "course names. If the list is empty, say so clearly."
+        )
     elif intent.startswith("faculty_") or intent in (
         "at_risk_students",
         "peers_gpa",
     ):
         prompt = FACULTY_PROMPT.format(faculty_data=data, question=msg)
+    elif intent == "student_grade_calculation":
+        policy_data = await query_policy_documents_async(msg)
+        policy_data = _trim_rag_policy_data(policy_data, msg, sid, user_context)
+        prompt = GRADE_CALCULATION_PROMPT.format(
+            results_data=data,
+            policy_data=policy_data,
+            question=msg,
+        )
     else:
         prompt = f"Data: {data}\nQuestion: {msg}"
 

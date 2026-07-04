@@ -1,6 +1,18 @@
-version: "3.9"
-
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: taia_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - taia_network
+    restart: unless-stopped
+
   erp:
     build:
       context: .
@@ -8,26 +20,14 @@ services:
     container_name: taia_mock_erp
     ports:
       - "8001:8001"
-    env_file:
-      - .env
-    volumes:
-      - ./data:/app/data
-    networks:
-      - taia_network
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
-      interval: 5s
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
       timeout: 3s
-      retries: 10
-      start_period: 10s
-
-  redis:
-    image: redis:7-alpine
-    container_name: taia_redis
-    ports:
-      - "6379:6379"
+      retries: 3
     networks:
       - taia_network
+    restart: unless-stopped
 
   fastapi:
     build:
@@ -38,27 +38,14 @@ services:
       - "8000:8000"
     env_file:
       - .env
-    environment:
-      ERP_API_BASE_URL: http://erp:8001/api/v1
-      APP_HOST: 0.0.0.0
-      APP_PORT: 8000
-      REDIS_HOST: redis
-      REDIS_URL: redis://redis:6379/0
-      GUNICORN_WORKERS: "1"
-      LOG_LEVEL: INFO
-    volumes:
-      - ./data:/app/data
     depends_on:
-      - erp
-      - redis
+      redis:
+        condition: service_healthy
+      erp:
+        condition: service_healthy
     networks:
       - taia_network
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 15s
+    restart: unless-stopped
 
   flask:
     build:
@@ -69,17 +56,9 @@ services:
       - "5000:5000"
     env_file:
       - .env
-    environment:
-      ERP_API_BASE_URL: http://erp:8001/api/v1
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      erp:
-        condition: service_healthy
-      fastapi:
-        condition: service_healthy
     networks:
       - taia_network
+    restart: unless-stopped
 
 networks:
   taia_network:

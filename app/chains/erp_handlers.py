@@ -124,7 +124,71 @@ async def get_course_performance() -> dict:
 
 
 async def get_faculty_ungraded() -> dict:
-    return await _get("/faculty/ungraded")
+    data = await _get("/faculty/ungraded")
+    if not isinstance(data, dict):
+        return data if data else {}
+
+    # Ensure we have the best list under 'top_ungraded_assignments'
+    summary = data.get("summary")
+    if isinstance(summary, dict):
+        if "top_ungraded_assignments" not in data and summary.get("top_ungraded_assignments"):
+            data["top_ungraded_assignments"] = summary["top_ungraded_assignments"]
+        if data.get("total_ungraded") is None and summary.get("total_ungraded") is not None:
+            data["total_ungraded"] = summary["total_ungraded"]
+
+    if "top_ungraded_assignments" not in data:
+        if data.get("ungraded_assignments"):
+            data["top_ungraded_assignments"] = data["ungraded_assignments"]
+        elif data.get("assignments"):
+            data["top_ungraded_assignments"] = data["assignments"]
+
+    # Trim to at most 10 to keep prompt small and latency low
+    assignments = data.get("top_ungraded_assignments", [])
+    if assignments:
+        data["top_ungraded_assignments"] = assignments[:10]
+        data["total_ungraded"] = len(assignments)  # show actual total but send only top 10
+
+    return data
+
+
+async def get_faculty_teaching(faculty_id: str) -> dict:
+    return await _get(f"/faculty/{faculty_id}/teaching")
+
+
+async def get_student_instructors(student_id: str) -> dict:
+    return await _get(f"/student/{student_id}/instructors")
+
+
+async def get_admin_salary_unpaid() -> list:
+    return await _get("/admin/salary-unpaid")
+
+
+async def get_admin_late_fees_total() -> dict:
+    return await _get("/admin/finance/late-fees-total")
+
+
+async def get_course_average_grade(faculty_id: str, course_id: str) -> dict:
+    return await _get(f"/faculty/{faculty_id}/course/{course_id}/average-grade")
+
+
+async def get_missed_midterm_students(faculty_id: str, course_id: str) -> dict:
+    return await _get(f"/faculty/{faculty_id}/course/{course_id}/missed-midterm")
+
+
+async def get_course_low_attendance(faculty_id: str, course_id: str) -> dict:
+    return await _get(f"/faculty/{faculty_id}/course/{course_id}/low-attendance")
+
+
+async def get_course_top_marks(faculty_id: str, course_id: str) -> dict:
+    return await _get(f"/faculty/{faculty_id}/course/{course_id}/top-marks")
+
+
+_COURSE_ID_PATTERN = re.compile(r"[A-Z]{2,4}-\d+", re.I)
+
+
+def extract_course_id_from_message(message: str) -> Optional[str]:
+    match = _COURSE_ID_PATTERN.search(message)
+    return match.group(0).upper() if match else None
 
 
 async def get_all_faculty_attendance(faculty_id: str) -> dict:
@@ -150,19 +214,70 @@ async def get_all_faculty_at_risk(faculty_id: str) -> dict:
     courses_data = await get_faculty_courses(faculty_id)
     courses = courses_data.get("courses", [])
     if not courses:
-        return {"faculty_id": faculty_id, "at_risk_by_course": []}
+        return {"faculty_id": faculty_id, "at_risk_by_course": [], "total_at_risk": 0}
 
-    async def _fetch(course: dict) -> dict:
+    async def _fetch(course: dict) -> dict | None:
         course_key = course.get("course_id") or course.get("course_code")
         if not course_key:
-            return {}
+            return None
         risk = await get_course_students(faculty_id, course_key)
-        risk["course_name"] = course.get("course_name", "")
-        return risk
+        course_id = risk.get("course_id") or course_key
+        course_name = course.get("course_name", "") or risk.get("course_name", "")
+
+        at_risk = risk.get("at_risk_students")
+        if at_risk:
+            source_students = at_risk
+        else:
+            all_students = risk.get("students", [])
+            source_students = [
+                student for student in all_students
+                if isinstance(student, dict) and student.get("at_risk")
+            ]
+
+        compact_students = []
+        for student in source_students:
+            if isinstance(student, dict) and student.get("student_id"):
+                reason = student.get("reason", "")
+                # Determine if it's low attendance based on available fields
+                if student.get("attendance_percentage", 100) < 75:
+                    reason = reason or "Low attendance"
+                elif student.get("gpa", 4.0) < 2.5:
+                    reason = reason or "Academic performance (GPA)"
+                compact_students.append({
+                    "student_id": student["student_id"],
+                    "student_name": student.get("student_name") or student.get("name", ""),
+                    "reason": reason
+                })
+
+        if not compact_students:
+            return None
+
+        return {
+            "course_id": course_id,
+            "course_name": course_name,
+            "at_risk_students": compact_students,
+        }
 
     results = await asyncio.gather(*[_fetch(course) for course in courses])
-    all_at_risk = [item for item in results if item]
-    return {"faculty_id": faculty_id, "at_risk_by_course": all_at_risk}
+    at_risk_by_course = [item for item in results if item]
+    total_at_risk = sum(len(course.get("at_risk_students", [])) for course in at_risk_by_course)
+    # Build a flat top-10 list for the prompt
+    top_at_risk = []
+    for course in at_risk_by_course:
+        for stu in course["at_risk_students"]:
+            top_at_risk.append({
+                "student_id": stu["student_id"],
+                "student_name": stu["student_name"],
+                "reason": stu.get("reason", ""),
+                "course_name": course["course_name"]
+            })
+    top_at_risk = top_at_risk[:10]
+    return {
+        "faculty_id": faculty_id,
+        "at_risk_by_course": at_risk_by_course,
+        "total_at_risk": total_at_risk,
+        "top_at_risk_students": top_at_risk,
+    }
 
 
 def _faculty_attendance_is_empty(data: dict) -> bool:
@@ -299,6 +414,8 @@ FINANCE_INTENTS = {
     "admin_finance_pending",
     "admin_finance_scholarship",
     "admin_finance_summary",
+    "admin_teacher_salary",
+    "admin_late_fees",
 }
 
 STUDENT_RESTRICTED_INTENTS = FINANCE_INTENTS | {
@@ -313,6 +430,11 @@ STUDENT_RESTRICTED_INTENTS = FINANCE_INTENTS | {
     "faculty_at_risk",
     "faculty_courses",
     "faculty_performance",
+    "faculty_teaching",
+    "faculty_course_low_attendance",
+    "faculty_course_top_marks",
+    "faculty_missed_midterm",
+    "faculty_course_average_grade",
 }
 
 FACULTY_RESTRICTED_INTENTS = {
@@ -326,6 +448,8 @@ FACULTY_RESTRICTED_INTENTS = {
     "admin_finance_pending",
     "admin_finance_scholarship",
     "admin_finance_summary",
+    "admin_teacher_salary",        # ← added
+    "admin_late_fees",             # ← added
     "attendance",
     "results",
     "gpa",
@@ -335,6 +459,9 @@ FACULTY_RESTRICTED_INTENTS = {
     "assignments",
     "exams",
     "study_plan",
+    "student_instructors",
+    "student_current_semester",
+    "student_grade_calculation",
 }
 
 
@@ -435,6 +562,10 @@ async def fetch_erp_data(intent: str, uid: str, role: str, message: str) -> Tupl
             data = await get_faculty_courses(query_uid)
         elif intent == "faculty_performance":
             data = await get_course_performance()
+        elif intent == "faculty_teaching":
+            data = await get_faculty_teaching(query_uid)
+        elif intent == "student_instructors":
+            data = await get_student_instructors(query_uid)
         elif intent == "admin_students":
             data = await get_admin_student_stats()
         elif intent == "admin_admissions":
@@ -463,10 +594,48 @@ async def fetch_erp_data(intent: str, uid: str, role: str, message: str) -> Tupl
             data = await get_admin_finance_scholarship_stats()
         elif intent == "admin_finance_summary":
             data = await get_admin_finance_summary()
+        elif intent == "student_current_semester":
+            profile = await get_student_profile(query_uid)
+            semester = profile.get("current_semester") or profile.get("semester")
+            data = {"current_semester": semester, "student_id": query_uid}
+        elif intent == "student_grade_calculation":
+            data = await get_student_results(query_uid)
+        elif intent == "faculty_course_low_attendance":
+            course_id = extract_course_id_from_message(message)
+            if course_id:
+                data = await get_course_low_attendance(query_uid, course_id)
+            else:
+                data = await get_faculty_at_risk_with_fallback(query_uid)
+        elif intent == "faculty_course_top_marks":
+            course_id = extract_course_id_from_message(message)
+            if course_id:
+                data = await get_course_top_marks(query_uid, course_id)
+            else:
+                data = {"error": "Course ID not found in message. Include a code like CS-302."}
+        elif intent == "faculty_course_average_grade":
+            course_id = extract_course_id_from_message(message)
+            if course_id:
+                data = await get_course_average_grade(query_uid, course_id)
+            else:
+                data = {"error": "Course ID not found in message. Include a code like CS-302."}
+        elif intent == "faculty_missed_midterm":
+            course_id = extract_course_id_from_message(message)
+            if course_id:
+                data = await get_missed_midterm_students(query_uid, course_id)
+            else:
+                data = {"error": "Course ID not found in message. Include a code like CS-302."}
+        elif intent == "admin_teacher_salary":
+            data = await get_admin_salary_unpaid()
+        elif intent == "admin_late_fees":
+            data = await get_admin_late_fees_total()
         else:
             return "", False
 
-        data = trim_erp_payload_for_llm(data, intent)
+        # For faculty_at_risk and faculty_ungraded, skip trim because we already formatted cleanly
+        if intent in ("faculty_at_risk", "faculty_ungraded"):
+            return json.dumps(data), False
+
+        data = trim_erp_payload_for_llm(data, intent, message)
         return json.dumps(data), False
     except Exception as exc:
         logger.error(

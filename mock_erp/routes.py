@@ -121,6 +121,57 @@ def warmup_cache():
     _build_indexes()
     logger.info("Mock ERP cache warmed in %.0fms", (time.perf_counter() - t0) * 1000)
 
+
+_EXTENDED_DATA_FILES = ("salaries", "late_fees", "exam_attendance", "admin_stats")
+_extended_indexes_built = False
+
+
+def _build_extended_indexes():
+    """Build supplemental indexes for new ERP endpoints (additive only)."""
+    global _extended_indexes_built
+    if _extended_indexes_built:
+        return
+
+    for name in _EXTENDED_DATA_FILES:
+        get_data(name)
+
+    salaries = get_data("salaries")
+    if isinstance(salaries, list):
+        _indexes["salaries_unpaid"] = [
+            row for row in salaries
+            if isinstance(row, dict) and not row.get("collected")
+        ]
+    else:
+        _indexes["salaries_unpaid"] = []
+
+    exam_attendance = get_data("exam_attendance")
+    if isinstance(exam_attendance, dict):
+        _indexes["exam_attendance_by_course"] = exam_attendance
+    else:
+        _indexes["exam_attendance_by_course"] = {}
+
+    course_performance = get_data("course_performance")
+    if isinstance(course_performance, list):
+        _indexes["course_performance_by_course"] = {
+            row["course_id"]: row
+            for row in course_performance
+            if isinstance(row, dict) and row.get("course_id")
+        }
+    else:
+        _indexes["course_performance_by_course"] = {}
+
+    _extended_indexes_built = True
+    logger.info("Mock ERP extended indexes built.")
+
+
+def warmup_extended_cache():
+    """Preload extended datasets and supplemental indexes."""
+    t0 = time.perf_counter()
+    for name in _EXTENDED_DATA_FILES:
+        get_data(name)
+    _build_extended_indexes()
+    logger.info("Mock ERP extended cache warmed in %.0fms", (time.perf_counter() - t0) * 1000)
+
 # ──────────────── AUTH ────────────────
 from app.auth.jwt_handler import create_token
 
@@ -657,3 +708,175 @@ def admin_finance_summary():
     if isinstance(summary, list) or not summary:
         raise HTTPException(404, "Financial summary not found")
     return summary
+
+
+@router.get("/admin/salary-unpaid")
+def admin_salary_unpaid():
+    _build_extended_indexes()
+    return _indexes.get("salaries_unpaid", [])
+
+
+@router.get("/admin/finance/late-fees-total")
+def admin_late_fees_total():
+    stats = get_data("admin_stats")
+    if not isinstance(stats, dict):
+        raise HTTPException(404, "Admin stats not found")
+    return {"total_late_fees_collected": stats.get("total_late_fees_collected", 0)}
+
+
+@router.get("/faculty/{faculty_id}/course/{course_id}/average-grade")
+def faculty_course_average_grade(faculty_id: str, course_id: str):
+    _build_indexes()
+    _build_extended_indexes()
+    course_row = _indexes.get("course_performance_by_course", {}).get(course_id)
+    if course_row and course_row.get("average_grade"):
+        return {
+            "course_id": course_id,
+            "average_grade": course_row["average_grade"],
+            "average_percentage": course_row.get("average_percentage"),
+        }
+
+    performance_rows = _indexes["performance_by_course"].get(course_id, [])
+    if not performance_rows:
+        raise HTTPException(404, "Course performance not found")
+    totals = [row.get("total", 0) for row in performance_rows if row.get("total") is not None]
+    if not totals:
+        raise HTTPException(404, "No grade data for course")
+    avg_pct = round(sum(totals) / len(totals), 1)
+    return {"course_id": course_id, "average_grade": _percentage_to_letter(avg_pct), "average_percentage": avg_pct}
+
+
+def _percentage_to_letter(pct: float) -> str:
+    if pct >= 90:
+        return "A"
+    if pct >= 85:
+        return "A-"
+    if pct >= 80:
+        return "B+"
+    if pct >= 75:
+        return "B"
+    if pct >= 70:
+        return "B-"
+    if pct >= 65:
+        return "C+"
+    if pct >= 60:
+        return "C"
+    if pct >= 55:
+        return "C-"
+    if pct >= 50:
+        return "D"
+    return "F"
+
+
+@router.get("/faculty/{faculty_id}/course/{course_id}/missed-midterm")
+def faculty_missed_midterm(faculty_id: str, course_id: str):
+    _build_indexes()
+    _build_extended_indexes()
+    att = _indexes.get("exam_attendance_by_course", {}).get(course_id)
+    if not att:
+        raise HTTPException(404, "Midterm attendance data not found for course")
+
+    attended = set(att.get("attended_students", []))
+    all_students = att.get("all_students", [])
+    missed_ids = [sid for sid in all_students if sid not in attended]
+
+    students_by_id = _indexes.get("students_by_id", {})
+    missed = []
+    for sid in missed_ids:
+        student = students_by_id.get(sid, {})
+        missed.append({
+            "student_id": sid,
+            "student_name": student.get("name", ""),
+        })
+
+    return {
+        "course_id": course_id,
+        "exam_type": att.get("exam_type", "Midterm"),
+        "missed_count": len(missed),
+        "missed_students": missed,
+    }
+
+
+@router.get("/faculty/{faculty_id}/course/{course_id}/low-attendance")
+def faculty_course_low_attendance(faculty_id: str, course_id: str):
+    _build_indexes()
+    summary_rows = _indexes["attendance_summary_by_course"].get(course_id, [])
+    if summary_rows:
+        low = [
+            {
+                "student_id": row["student_id"],
+                "student_name": row["student_name"],
+                "attendance_percentage": row["attendance_percentage"],
+            }
+            for row in summary_rows
+            if row.get("attendance_percentage", 100) < 75
+        ]
+        return {
+            "course_id": course_id,
+            "threshold": 75,
+            "low_attendance_count": len(low),
+            "students": low,
+        }
+
+    records = _indexes["attendance_by_course"].get(course_id, [])
+    students_att = {}
+    for record in records:
+        sid = record["student_id"]
+        if sid not in students_att:
+            students_att[sid] = {
+                "student_id": sid,
+                "student_name": record["student_name"],
+                "present": 0,
+                "absent": 0,
+                "late": 0,
+                "total": 0,
+            }
+        students_att[sid]["total"] += 1
+        if record["status"] == "Present":
+            students_att[sid]["present"] += 1
+        elif record["status"] == "Absent":
+            students_att[sid]["absent"] += 1
+        else:
+            students_att[sid]["late"] += 1
+
+    low = []
+    for row in students_att.values():
+        pct = round((row["present"] + row["late"] * 0.5) / max(row["total"], 1) * 100, 1)
+        if pct < 75:
+            low.append({
+                "student_id": row["student_id"],
+                "student_name": row["student_name"],
+                "attendance_percentage": pct,
+            })
+
+    return {
+        "course_id": course_id,
+        "threshold": 75,
+        "low_attendance_count": len(low),
+        "students": low,
+    }
+
+
+@router.get("/faculty/{faculty_id}/course/{course_id}/top-marks")
+def faculty_course_top_marks(faculty_id: str, course_id: str):
+    _build_indexes()
+    performance_rows = _indexes["performance_by_course"].get(course_id, [])
+    if not performance_rows:
+        raise HTTPException(404, "No student performance data for course")
+
+    ranked = sorted(
+        performance_rows,
+        key=lambda row: row.get("total", 0) or 0,
+        reverse=True,
+    )[:5]
+    top = [
+        {
+            "student_id": row.get("student_id"),
+            "student_name": row.get("student_name"),
+            "total_marks": row.get("total"),
+            "current_grade": row.get("current_grade"),
+            "GPA": row.get("GPA"),
+        }
+        for row in ranked
+    ]
+    return {"course_id": course_id, "top_count": len(top), "top_students": top}

@@ -2,6 +2,8 @@
 
 LLM client configuration for TAIA.
 
+Architecture: Groq primary → static message on failure or rate limit.
+
 """
 
 import asyncio
@@ -14,11 +16,15 @@ import re
 
 import time
 
+from collections import deque
+
 from collections.abc import AsyncIterator
+
+from datetime import date
 
 from typing import Sequence
 
-
+import httpx
 
 from dotenv import load_dotenv
 
@@ -26,18 +32,28 @@ from langchain_core.messages import AIMessage, BaseMessage
 
 from langchain_openai import ChatOpenAI
 
-
-
 from app.config import get_settings
-
 
 
 load_dotenv()
 
 
-
 logger = logging.getLogger("taia.llm")
 
+logger.info("LLM Mode: Groq primary | static fallback")
+
+
+GROQ_PRIMARY_MODEL = os.getenv("GROQ_PRIMARY_MODEL", "llama-3.3-70b-versatile")
+
+_GROQ_DAILY_TOKEN_BUDGET = int(os.getenv("GROQ_DAILY_TOKEN_BUDGET", "1000000"))
+
+_GROQ_429_MAX_RETRIES = int(os.getenv("GROQ_429_MAX_RETRIES", "2"))
+
+_GROQ_429_DEFAULT_WAIT = 5.0
+
+_groq_tokens_used_today = 0
+
+_groq_token_day: date | None = None
 
 
 LLM_CONNECTION_ERROR = (
@@ -49,7 +65,6 @@ LLM_CONNECTION_ERROR = (
 )
 
 
-
 LLM_RATE_LIMIT_BUSY = (
 
     "I'm currently experiencing high traffic, please try again in a few seconds."
@@ -57,46 +72,19 @@ LLM_RATE_LIMIT_BUSY = (
 )
 
 
-
 LLM_STATIC_FALLBACK = (
 
-    "AI temporarily busy, showing fallback response."
+    "I'm currently overloaded. Please try again in a few minutes."
 
 )
-
-
-
-LLM_OPENROUTER_PAYMENT_ERROR = (
-
-    "The AI service is temporarily unavailable due to token limits. "
-
-    "Please try reducing your request or topping up the OpenRouter credits."
-
-)
-
-
-
-STATIC_FALLBACK_SOURCE = "static_fallback"
-
-
-
-_OPENROUTER_SAFETY_MODEL = "openai/gpt-4o-mini"
-
 
 
 _KEY_ENV_VARS = ("GROQ_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY")
 
-_FALLBACK_MAX_TOKENS = int(os.getenv("LLM_FALLBACK_MAX_TOKENS", "512"))
-
-_GROQ_429_MAX_RETRIES = int(os.getenv("GROQ_429_MAX_RETRIES", "2"))
-
-_GROQ_429_RETRY_DELAY = float(os.getenv("GROQ_429_RETRY_DELAY_SECONDS", "2"))
-
-
 
 _settings = get_settings()
 
-PRIMARY_MODEL = _settings.LLM_PRIMARY_MODEL
+PRIMARY_MODEL = _settings.LLM_PRIMARY_MODEL or GROQ_PRIMARY_MODEL
 
 FALLBACK_MODEL = _settings.LLM_FALLBACK_MODEL
 
@@ -106,13 +94,10 @@ CLASSIFIER_MODEL = os.getenv("LLM_CLASSIFIER_MODEL", FALLBACK_MODEL)
 
 _api_key_checked = False
 
-_llm_cache: dict[tuple, ChatOpenAI] = {}
+_groq_cache: dict[tuple, ChatOpenAI] = {}
 
 
-
-
-
-def _resolve_api_key() -> str | None:
+def _resolve_groq_api_key() -> str | None:
 
     for env_var in _KEY_ENV_VARS:
 
@@ -125,10 +110,7 @@ def _resolve_api_key() -> str | None:
     return None
 
 
-
-
-
-def _resolve_base_url(api_key: str) -> str:
+def _resolve_groq_base_url() -> str:
 
     explicit = os.getenv("LLM_BASE_URL", "").strip()
 
@@ -136,80 +118,32 @@ def _resolve_base_url(api_key: str) -> str:
 
         return explicit
 
-    if api_key.startswith("gsk_"):
-
-        return "https://api.groq.com/openai/v1"
-
-    return os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
-
-
-
-
-
-def _resolve_credentials_for_model(model: str) -> tuple[str, str]:
-
-    openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-
-    if (
-
-        _uses_openrouter(model)
-
-        and openrouter_key
-
-    ):
-
-        return (
-
-            openrouter_key,
-
-            os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-
-        )
-
-
-
-    api_key = _resolve_api_key()
-
-    if not api_key:
-
-        raise ValueError("LLM API key is not configured")
-
-
-
-    return api_key, _resolve_base_url(api_key)
-
-
-
+    return "https://api.groq.com/openai/v1"
 
 
 def check_llm_api_key() -> bool:
 
-    """Log whether an LLM API key is present at runtime (once per process)."""
+    """Verify Groq API key is configured for the primary provider."""
 
     groq_api_key = os.getenv("GROQ_API_KEY", "").strip()
 
-    if not groq_api_key:
+    if groq_api_key:
 
-        resolved = _resolve_api_key()
+        logger.info("GROQ_API_KEY loaded successfully")
 
-        if not resolved:
+        return True
 
-            logger.critical("GROQ_API_KEY is empty or missing from .env file")
+    resolved = _resolve_groq_api_key()
 
-            return False
+    if resolved:
 
         logger.info("LLM API key loaded via fallback env var")
 
         return True
 
+    logger.critical("GROQ_API_KEY is empty or missing from .env file")
 
-
-    logger.info("GROQ_API_KEY loaded successfully")
-
-    return True
-
-
-
+    return False
 
 
 def get_llm(
@@ -222,7 +156,7 @@ def get_llm(
 
 ) -> ChatOpenAI:
 
-    """Return a configured LangChain ChatOpenAI client for the given model."""
+    """Return a Groq ChatOpenAI client (primary provider only)."""
 
     global _api_key_checked
 
@@ -234,27 +168,25 @@ def get_llm(
 
         _api_key_checked = True
 
-
-
     resolved_model = model or PRIMARY_MODEL
 
     cache_key = (resolved_model, max_tokens, streaming)
 
-    if cache_key in _llm_cache:
+    if cache_key in _groq_cache:
 
-        return _llm_cache[cache_key]
+        return _groq_cache[cache_key]
 
+    api_key = _resolve_groq_api_key()
 
+    if not api_key:
 
-    api_key, base_url = _resolve_credentials_for_model(resolved_model)
-
-
+        raise ValueError("LLM API key is not configured")
 
     kwargs: dict = {
 
         "api_key": api_key,
 
-        "base_url": base_url,
+        "base_url": _resolve_groq_base_url(),
 
         "model": resolved_model,
 
@@ -272,16 +204,11 @@ def get_llm(
 
         kwargs["max_tokens"] = max_tokens
 
-
-
     client = ChatOpenAI(**kwargs)
 
-    _llm_cache[cache_key] = client
+    _groq_cache[cache_key] = client
 
     return client
-
-
-
 
 
 def _iter_error_chain(error: BaseException):
@@ -297,9 +224,6 @@ def _iter_error_chain(error: BaseException):
         yield current
 
         current = current.__cause__ or current.__context__
-
-
-
 
 
 def _message_indicates_rate_limit(message: str) -> bool:
@@ -335,27 +259,14 @@ def _message_indicates_rate_limit(message: str) -> bool:
     )
 
 
-
-
-
 def is_rate_limit_error(error: Exception) -> bool:
-
-    """Detect rate limits anywhere in the exception chain (for outer handlers)."""
 
     return any(_exception_indicates_rate_limit(exc) for exc in _iter_error_chain(error))
 
 
-
-
-
 def is_direct_rate_limit_error(error: Exception) -> bool:
 
-    """Detect rate limits on this exception only (ignore chained primary 429)."""
-
     return _exception_indicates_rate_limit(error)
-
-
-
 
 
 def _exception_indicates_rate_limit(exc: BaseException) -> bool:
@@ -366,15 +277,11 @@ def _exception_indicates_rate_limit(exc: BaseException) -> bool:
 
         return True
 
-
-
     status_code = getattr(exc, "status_code", None)
 
     if status_code == 429:
 
         return True
-
-
 
     response = getattr(exc, "response", None)
 
@@ -400,108 +307,7 @@ def _exception_indicates_rate_limit(exc: BaseException) -> bool:
 
             pass
 
-
-
     return _message_indicates_rate_limit(str(exc))
-
-
-
-
-
-def _uses_openrouter(model: str) -> bool:
-
-    return model == _OPENROUTER_SAFETY_MODEL
-
-
-
-
-
-def _static_fallback_payload() -> dict[str, str]:
-
-    return {
-
-        "text": LLM_STATIC_FALLBACK,
-
-        "source": STATIC_FALLBACK_SOURCE,
-
-    }
-
-
-
-
-
-def _static_fallback_message() -> AIMessage:
-
-    return AIMessage(
-
-        content=LLM_STATIC_FALLBACK,
-
-        additional_kwargs=_static_fallback_payload(),
-
-    )
-
-
-
-
-
-def _groq_failure_allows_fallback(exc: Exception) -> bool:
-
-    return is_direct_rate_limit_error(exc)
-
-
-
-
-
-def _exception_status_code(error: Exception) -> int | None:
-
-    status_code = getattr(error, "status_code", None)
-
-    if status_code is not None:
-
-        return int(status_code)
-
-
-
-    response = getattr(error, "response", None)
-
-    if response is not None:
-
-        response_status = getattr(response, "status_code", None)
-
-        if response_status is not None:
-
-            return int(response_status)
-
-
-
-    return None
-
-
-
-
-
-def is_openrouter_payment_error(error: Exception) -> bool:
-
-    if _exception_status_code(error) == 402:
-
-        return True
-
-
-
-    message = str(error).lower()
-
-    return "payment required" in message or "can only afford" in message
-
-
-
-
-
-def _openrouter_payment_fallback_message() -> AIMessage:
-
-    return AIMessage(content=LLM_OPENROUTER_PAYMENT_ERROR)
-
-
-
 
 
 def is_llm_auth_error(error: Exception) -> bool:
@@ -510,15 +316,11 @@ def is_llm_auth_error(error: Exception) -> bool:
 
         return False
 
-
-
     message = str(error).lower()
 
     if _message_indicates_rate_limit(message):
 
         return False
-
-
 
     return any(
 
@@ -539,7 +341,78 @@ def is_llm_auth_error(error: Exception) -> bool:
     ) or bool(re.search(r"(?:error code:\s*401|\b401 unauthorized\b)", message))
 
 
+def _groq_failure_allows_static_fallback(exc: Exception) -> bool:
 
+    return not is_llm_auth_error(exc)
+
+
+def _groq_error_message(exc: BaseException) -> str:
+
+    if isinstance(exc, httpx.HTTPStatusError):
+
+        try:
+
+            body = exc.response.json()
+
+            message = (body.get("error") or {}).get("message", "")
+
+            if message:
+
+                return str(message)
+
+        except Exception:
+
+            pass
+
+    response = getattr(exc, "response", None)
+
+    if response is not None:
+
+        try:
+
+            body = response.json()
+
+            message = (body.get("error") or {}).get("message", "")
+
+            if message:
+
+                return str(message)
+
+        except Exception:
+
+            pass
+
+    return str(exc)
+
+
+def _parse_groq_retry_wait_seconds(exc: Exception) -> float:
+
+    """Extract 'try again in Xs' from a Groq 429 error; default 5 seconds."""
+
+    message = _groq_error_message(exc)
+
+    match = re.search(r"try again in\s+([\d.]+)\s*s", message, re.IGNORECASE)
+
+    if match:
+
+        try:
+
+            return float(match.group(1))
+
+        except ValueError:
+
+            pass
+
+    return _GROQ_429_DEFAULT_WAIT
+
+
+def _is_groq_429_error(exc: Exception) -> bool:
+
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+
+        return True
+
+    return is_direct_rate_limit_error(exc)
 
 
 def _chunk_text(content) -> str:
@@ -567,17 +440,125 @@ def _chunk_text(content) -> str:
     return str(content) if content else ""
 
 
+def _reset_token_counter_if_new_day() -> None:
+
+    global _groq_tokens_used_today, _groq_token_day
+
+    today = date.today()
+
+    if _groq_token_day != today:
+
+        _groq_tokens_used_today = 0
+
+        _groq_token_day = today
 
 
+def _estimate_tokens(messages):
 
-async def ainvoke_classifier_llm(messages: Sequence[BaseMessage]) -> BaseMessage:
+    total_chars = sum(len(str(getattr(msg, 'content', ''))) for msg in messages)
+
+    input_estimate = max(1, total_chars // 3)
+
+    output_reserve = 800
+
+    return input_estimate + output_reserve
+
+
+def _get_remaining_daily_tokens() -> int:
+
+    _reset_token_counter_if_new_day()
+
+    return max(0, _GROQ_DAILY_TOKEN_BUDGET - _groq_tokens_used_today)
+
+
+def _record_groq_token_usage(messages: Sequence[BaseMessage], response_text: str = "") -> None:
+
+    global _groq_tokens_used_today
+
+    _reset_token_counter_if_new_day()
+
+    _groq_tokens_used_today += _estimate_tokens(messages) + max(1, len(response_text) // 4)
+
+
+def _groq_token_budget_exceeded(messages: Sequence[BaseMessage]) -> bool:
+
+    estimated = _estimate_tokens(messages)
+
+    remaining = _get_remaining_daily_tokens()
+
+    if estimated > remaining:
+
+        logger.info(
+
+            "Token budget exceeded (estimated=%s, remaining=%s); skipping Groq",
+
+            estimated,
+
+            remaining,
+
+        )
+
+        return True
+
+    return False
+
+
+# ---------- Per-minute rate limiter (TPM) ----------
+_TPM_WINDOW = 60
+_TPM_LIMIT = int(os.getenv("GROQ_TPM_LIMIT", "6000"))
+_tpm_log: deque[tuple[float, int]] = deque()
+
+
+def _current_tpm() -> int:
+    """Sum of tokens used in the last _TPM_WINDOW seconds."""
+    now = time.time()
+    while _tpm_log and _tpm_log[0][0] < now - _TPM_WINDOW:
+        _tpm_log.popleft()
+    return sum(tokens for _, tokens in _tpm_log)
+
+
+def _would_exceed_tpm(estimated_tokens: int) -> bool:
+    """Return True if adding estimated_tokens would exceed the TPM limit."""
+    return (_current_tpm() + estimated_tokens) > _TPM_LIMIT
+
+
+def _record_tpm(tokens: int) -> None:
+    """Record that tokens were just used."""
+    _tpm_log.append((time.time(), tokens))
+
+
+def _groq_tpm_would_be_exceeded(messages: Sequence[BaseMessage]) -> bool:
+    estimated = _estimate_tokens(messages)
+    if _would_exceed_tpm(estimated):
+        logger.info(
+            "TPM limit would be exceeded (estimated=%s, current=%s, limit=%s); returning static fallback",
+            estimated,
+            _current_tpm(),
+            _TPM_LIMIT,
+        )
+        return True
+    return False
+
+
+def _extract_groq_token_usage(
+    result: BaseMessage,
+    messages: Sequence[BaseMessage],
+    response_text: str = "",
+) -> int:
+    metadata = getattr(result, "response_metadata", None) or {}
+    usage = metadata.get("token_usage") or metadata.get("usage") or {}
+    if isinstance(usage, dict):
+        total = usage.get("total_tokens")
+        if total is not None:
+            return int(total)
+    return _estimate_tokens(messages) + max(1, len(response_text) // 4)
+
+
+async def ainvoke_classifier_llm(messages: Sequence[BaseMessage]) -> AIMessage:
 
     """Intent routing is heuristic-only; never call an LLM for classification."""
 
     return AIMessage(content="general")
-
-
-
 
 
 async def ainvoke_llm_with_fallback(
@@ -586,27 +567,33 @@ async def ainvoke_llm_with_fallback(
 
 ) -> BaseMessage:
 
-    """
+    """Groq primary; static message on budget limit or Groq failure after retries."""
 
-    One Groq call, then at most one OpenRouter call, then static fallback.
+    if _groq_token_budget_exceeded(messages):
 
-    """
+        return AIMessage(content=LLM_STATIC_FALLBACK)
 
     t0 = time.perf_counter()
 
-    primary_exc: Exception | None = None
+    groq = get_llm(model=PRIMARY_MODEL)
+
+    groq_exc: Exception | None = None
 
     for attempt in range(_GROQ_429_MAX_RETRIES + 1):
 
-        primary = get_llm(model=PRIMARY_MODEL)
-
         try:
 
-            result = await primary.ainvoke(messages)
+            result = await groq.ainvoke(messages)
+
+            response_text = _chunk_text(result.content)
+
+            _record_groq_token_usage(messages, response_text)
+
+            _record_tpm(_extract_groq_token_usage(result, messages, response_text))
 
             logger.info(
 
-                "LLM primary %s → %.2fs",
+                "LLM Groq primary %s → %.2fs",
 
                 PRIMARY_MODEL,
 
@@ -618,120 +605,69 @@ async def ainvoke_llm_with_fallback(
 
         except Exception as exc:
 
-            primary_exc = exc
+            groq_exc = exc
 
             if is_llm_auth_error(exc):
 
+                logger.warning(
+
+                    "Groq auth failed after %.2fs: %s",
+
+                    time.perf_counter() - t0,
+
+                    exc,
+
+                )
+
                 raise
 
-            if is_direct_rate_limit_error(exc) and attempt < _GROQ_429_MAX_RETRIES:
+            if _is_groq_429_error(exc) and attempt < _GROQ_429_MAX_RETRIES:
+
+                wait_seconds = _parse_groq_retry_wait_seconds(exc)
 
                 logger.warning(
 
                     "Groq rate limited (429); retrying in %.1fs (attempt %s/%s)",
 
-                    _GROQ_429_RETRY_DELAY,
+                    wait_seconds + 1,
 
                     attempt + 1,
 
-                    _GROQ_429_MAX_RETRIES + 1,
+                    _GROQ_429_MAX_RETRIES,
 
                 )
 
-                await asyncio.sleep(_GROQ_429_RETRY_DELAY)
+                await asyncio.sleep(wait_seconds + 1)
 
                 continue
 
+            if not _groq_failure_allows_static_fallback(exc):
+
+                logger.warning(
+
+                    "Groq failed after %.2fs: %s",
+
+                    time.perf_counter() - t0,
+
+                    exc,
+
+                )
+
+                raise
+
             break
 
-    if primary_exc is not None:
+    logger.warning(
 
-        elapsed = time.perf_counter() - t0
+        "Groq rate limited or unavailable after %.2fs (%s); returning static fallback.",
 
-        if not _groq_failure_allows_fallback(primary_exc):
+        time.perf_counter() - t0,
 
-            logger.warning(
+        groq_exc,
 
-                "LLM primary %s failed after %.2fs: %s",
+    )
 
-                PRIMARY_MODEL,
-
-                elapsed,
-
-                primary_exc,
-
-            )
-
-            raise primary_exc
-
-        logger.warning("Primary model rate limited. Switching to fallback model.")
-
-
-
-    openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-
-    if not openrouter_key:
-
-        logger.warning("OpenRouter not configured. Returning static fallback.")
-
-        return _static_fallback_message()
-
-
-
-    t1 = time.perf_counter()
-
-    fallback = get_llm(model=_OPENROUTER_SAFETY_MODEL, max_tokens=_FALLBACK_MAX_TOKENS)
-
-    try:
-
-        result = await fallback.ainvoke(messages)
-
-        logger.info("Fallback model succeeded.")
-
-        logger.info(
-
-            "LLM fallback %s â†’ %.2fs",
-
-            _OPENROUTER_SAFETY_MODEL,
-
-            time.perf_counter() - t1,
-
-        )
-
-        return result
-
-    except Exception as fallback_exc:
-
-        if is_openrouter_payment_error(fallback_exc):
-
-            logger.warning(
-
-                "OpenRouter returned 402 Payment Required after %.2fs: %s",
-
-                time.perf_counter() - t1,
-
-                fallback_exc,
-
-            )
-
-            return _openrouter_payment_fallback_message()
-
-        logger.warning(
-
-            "OpenRouter fallback failed after %.2fs: %s",
-
-            time.perf_counter() - t1,
-
-            fallback_exc,
-
-        )
-
-        logger.warning("Fallback model failed. Returning static fallback.")
-
-        return _static_fallback_message()
-
-
-
+    return AIMessage(content=LLM_STATIC_FALLBACK)
 
 
 async def astream_llm_with_fallback(
@@ -740,81 +676,103 @@ async def astream_llm_with_fallback(
 
 ) -> AsyncIterator[str]:
 
-    """
+    """Groq stream primary; static message on budget limit or Groq failure after retries."""
 
-    One Groq stream, then at most one OpenRouter stream, then static fallback.
+    if _groq_token_budget_exceeded(messages):
 
-    Never raise to the caller.
+        yield LLM_STATIC_FALLBACK
 
-    """
+        return
 
-    try:
+    t0 = time.perf_counter()
 
-        t0 = time.perf_counter()
+    groq = get_llm(model=PRIMARY_MODEL, streaming=True)
 
-        primary_exc: Exception | None = None
+    groq_exc: Exception | None = None
 
-        for attempt in range(_GROQ_429_MAX_RETRIES + 1):
+    for attempt in range(_GROQ_429_MAX_RETRIES + 1):
 
-            primary = get_llm(model=PRIMARY_MODEL, streaming=True)
+        collected: list[str] = []
 
-            try:
+        try:
 
-                async for chunk in primary.astream(messages):
+            async for chunk in groq.astream(messages):
 
-                    text = _chunk_text(chunk.content)
+                text = _chunk_text(chunk.content)
 
-                    if text:
+                if text:
 
-                        yield text
+                    collected.append(text)
 
-                logger.info(
+                    yield text
 
-                    "LLM stream primary %s → %.2fs",
+            response_text = "".join(collected)
 
-                    PRIMARY_MODEL,
+            _record_groq_token_usage(messages, response_text)
 
-                    time.perf_counter() - t0,
+            _record_tpm(_estimate_tokens(messages) + max(1, len(response_text) // 4))
 
-                )
+            logger.info(
 
-                return
+                "LLM Groq stream primary %s → %.2fs",
 
-            except Exception as exc:
+                PRIMARY_MODEL,
 
-                primary_exc = exc
+                time.perf_counter() - t0,
 
-                if is_direct_rate_limit_error(exc) and attempt < _GROQ_429_MAX_RETRIES:
+            )
 
-                    logger.warning(
+            return
 
-                        "Groq stream rate limited (429); retrying in %.1fs (attempt %s/%s)",
+        except Exception as exc:
 
-                        _GROQ_429_RETRY_DELAY,
+            groq_exc = exc
 
-                        attempt + 1,
-
-                        _GROQ_429_MAX_RETRIES + 1,
-
-                    )
-
-                    await asyncio.sleep(_GROQ_429_RETRY_DELAY)
-
-                    continue
-
-                break
-
-        if primary_exc is not None:
-
-            if not _groq_failure_allows_fallback(primary_exc):
+            if is_llm_auth_error(exc):
 
                 logger.warning(
 
-                    "LLM stream primary failed after %.2fs: %s",
+                    "Groq stream auth failed after %.2fs: %s",
 
                     time.perf_counter() - t0,
 
-                    primary_exc,
+                    exc,
+
+                )
+
+                yield LLM_CONNECTION_ERROR
+
+                return
+
+            if _is_groq_429_error(exc) and attempt < _GROQ_429_MAX_RETRIES:
+
+                wait_seconds = _parse_groq_retry_wait_seconds(exc)
+
+                logger.warning(
+
+                    "Groq stream rate limited (429); retrying in %.1fs (attempt %s/%s)",
+
+                    wait_seconds + 1,
+
+                    attempt + 1,
+
+                    _GROQ_429_MAX_RETRIES,
+
+                )
+
+                await asyncio.sleep(wait_seconds + 1)
+
+                continue
+
+            if not _groq_failure_allows_static_fallback(exc):
+
+                logger.warning(
+
+                    "Groq stream failed after %.2fs: %s",
+
+                    time.perf_counter() - t0,
+
+                    exc,
 
                 )
 
@@ -822,102 +780,19 @@ async def astream_llm_with_fallback(
 
                 return
 
-            logger.warning("Primary model rate limited. Switching to fallback model.")
+            break
 
+    logger.warning(
 
+        "Groq stream rate limited or unavailable after %.2fs (%s); returning static fallback.",
 
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        time.perf_counter() - t0,
 
-        if not openrouter_key:
+        groq_exc,
 
-            yield LLM_STATIC_FALLBACK
+    )
 
-            return
-
-
-
-        t1 = time.perf_counter()
-
-        fallback = get_llm(
-
-            model=_OPENROUTER_SAFETY_MODEL,
-
-            max_tokens=_FALLBACK_MAX_TOKENS,
-
-            streaming=True,
-
-        )
-
-        try:
-
-            async for chunk in fallback.astream(messages):
-
-                text = _chunk_text(chunk.content)
-
-                if text:
-
-                    yield text
-
-            logger.info("Fallback model succeeded.")
-
-            logger.info(
-
-                "LLM stream fallback %s â†’ %.2fs",
-
-                _OPENROUTER_SAFETY_MODEL,
-
-                time.perf_counter() - t1,
-
-            )
-
-            return
-
-        except Exception as fallback_exc:
-
-            if is_openrouter_payment_error(fallback_exc):
-
-                logger.warning(
-
-                    "OpenRouter stream returned 402 Payment Required after %.2fs: %s",
-
-                    time.perf_counter() - t1,
-
-                    fallback_exc,
-
-                )
-
-                yield LLM_OPENROUTER_PAYMENT_ERROR
-
-                return
-
-            logger.warning(
-
-                "OpenRouter stream fallback failed after %.2fs: %s",
-
-                time.perf_counter() - t1,
-
-                fallback_exc,
-
-            )
-
-            yield LLM_STATIC_FALLBACK
-
-    except Exception as exc:
-
-        logger.warning(
-
-            "LLM stream pipeline failed; returning static fallback: %s",
-
-            exc,
-
-        )
-
-        yield LLM_STATIC_FALLBACK
-
-
-
-
-
+    yield LLM_STATIC_FALLBACK
 
 
 TAIA_IDENTITY_SYSTEM = """RESPONSE STYLE RULES (follow strictly):
@@ -944,13 +819,13 @@ Your purpose is to help university students, faculty, and admins with ERP querie
 
 CRITICAL IDENTITY RULES:
 
-1. You are TAIA â€” the AI assistant. You are NOT the user.
+1. You are TAIA — the AI assistant. You are NOT the user.
 
 2. Never confuse yourself with the logged-in user. Never say you are the user or use the user's name as your own.
 
-3. When the user asks about YOU ("Who are you?", "Tell me about yourself", "What is your name?" meaning the bot), answer ONLY what was asked â€” do not volunteer a full introduction unless they explicitly request one.
+3. When the user asks about YOU ("Who are you?", "Tell me about yourself", "What is your name?" meaning the bot), answer ONLY what was asked — do not volunteer a full introduction unless they explicitly request one.
 
-4. When the user asks about THEMSELVES ("Who am I?", "What is my name?", "What is my profile?"), their session data will be provided separately in that turn only â€” use it then, not otherwise.
+4. When the user asks about THEMSELVES ("Who am I?", "What is my name?", "What is my profile?"), their session data will be provided separately in that turn only — use it then, not otherwise.
 
 5. Be polite, professional, and accurate. Never reveal one user's data to another user.
 

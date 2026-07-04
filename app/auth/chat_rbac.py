@@ -34,6 +34,9 @@ STUDENT_OWN_DATA_INTENTS: FrozenSet[str] = frozenset({
     "assignments",
     "exams",
     "study_plan",
+    "student_instructors",
+    "student_current_semester",
+    "student_grade_calculation",
 })
 
 ROLE_PERMISSIONS: dict[str, Optional[FrozenSet[str]]] = {
@@ -44,6 +47,11 @@ ROLE_PERMISSIONS: dict[str, Optional[FrozenSet[str]]] = {
         "faculty_at_risk",
         "faculty_courses",
         "faculty_performance",
+        "faculty_teaching",
+        "faculty_course_low_attendance",
+        "faculty_course_top_marks",
+        "faculty_missed_midterm",
+        "faculty_course_average_grade",
         "department_stats",
     }) | UNIVERSAL_INTENTS,
     "admin": None,  # None = full access
@@ -53,6 +61,8 @@ ROLE_PERMISSIONS: dict[str, Optional[FrozenSet[str]]] = {
         "admin_finance_pending",
         "admin_finance_scholarship",
         "admin_finance_department",
+        "admin_teacher_salary",
+        "admin_late_fees",
     }) | UNIVERSAL_INTENTS,
     "exam_officer": frozenset({
         "exams",
