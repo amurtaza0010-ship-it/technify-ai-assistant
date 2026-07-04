@@ -114,6 +114,44 @@ def _resolve_base_url(api_key: str) -> str:
 
 
 
+def _resolve_credentials_for_model(model: str) -> tuple[str, str]:
+
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+
+    if (
+
+        model == FALLBACK_MODEL
+
+        and model != PRIMARY_MODEL
+
+        and openrouter_key
+
+    ):
+
+        return (
+
+            openrouter_key,
+
+            os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+
+        )
+
+
+
+    api_key = _resolve_api_key()
+
+    if not api_key:
+
+        raise ValueError("LLM API key is not configured")
+
+
+
+    return api_key, _resolve_base_url(api_key)
+
+
+
+
+
 def check_llm_api_key() -> bool:
 
     """Log whether an LLM API key is present at runtime (once per process)."""
@@ -168,14 +206,6 @@ def get_llm(
 
 
 
-    api_key = _resolve_api_key()
-
-    if not api_key:
-
-        raise ValueError("LLM API key is not configured")
-
-
-
     resolved_model = model or PRIMARY_MODEL
 
     cache_key = (resolved_model, max_tokens, streaming)
@@ -186,11 +216,15 @@ def get_llm(
 
 
 
+    api_key, base_url = _resolve_credentials_for_model(resolved_model)
+
+
+
     kwargs: dict = {
 
         "api_key": api_key,
 
-        "base_url": _resolve_base_url(api_key),
+        "base_url": base_url,
 
         "model": resolved_model,
 
