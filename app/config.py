@@ -10,7 +10,7 @@ load_dotenv()
 
 _DEFAULT_PRIMARY = "llama-3.3-70b-versatile"
 
-_DEFAULT_FALLBACK = "llama-3.1-8b-instant"
+_DEFAULT_FALLBACK = "openai/gpt-4o-mini"
 
 
 
@@ -46,7 +46,7 @@ class Settings:
 
     )
 
-    # Primary / fallback Groq models (env overrides with hardcoded defaults)
+    # Primary Groq model (env overrides with hardcoded default)
 
     LLM_PRIMARY_MODEL: str = (
 
@@ -58,11 +58,11 @@ class Settings:
 
     )
 
+    # OpenRouter fallback model — LLM_FALLBACK_MODEL only (never GROQ_FALLBACK_MODEL)
+
     LLM_FALLBACK_MODEL: str = (
 
-        os.getenv("GROQ_FALLBACK_MODEL")
-
-        or os.getenv("LLM_FALLBACK_MODEL")
+        os.getenv("LLM_FALLBACK_MODEL")
 
         or _DEFAULT_FALLBACK
 

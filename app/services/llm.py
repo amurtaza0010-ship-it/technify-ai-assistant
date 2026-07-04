@@ -1,8 +1,10 @@
-"""
+﻿"""
 
 LLM client configuration for TAIA.
 
 """
+
+import asyncio
 
 import logging
 
@@ -56,9 +58,39 @@ LLM_RATE_LIMIT_BUSY = (
 
 
 
+LLM_STATIC_FALLBACK = (
+
+    "AI temporarily busy, showing fallback response."
+
+)
+
+
+
+LLM_OPENROUTER_PAYMENT_ERROR = (
+
+    "The AI service is temporarily unavailable due to token limits. "
+
+    "Please try reducing your request or topping up the OpenRouter credits."
+
+)
+
+
+
+STATIC_FALLBACK_SOURCE = "static_fallback"
+
+
+
+_OPENROUTER_SAFETY_MODEL = "openai/gpt-4o-mini"
+
+
+
 _KEY_ENV_VARS = ("GROQ_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY")
 
-_FALLBACK_MAX_TOKENS = int(os.getenv("LLM_FALLBACK_MAX_TOKENS", "800"))
+_FALLBACK_MAX_TOKENS = int(os.getenv("LLM_FALLBACK_MAX_TOKENS", "512"))
+
+_GROQ_429_MAX_RETRIES = int(os.getenv("GROQ_429_MAX_RETRIES", "2"))
+
+_GROQ_429_RETRY_DELAY = float(os.getenv("GROQ_429_RETRY_DELAY_SECONDS", "2"))
 
 
 
@@ -120,9 +152,7 @@ def _resolve_credentials_for_model(model: str) -> tuple[str, str]:
 
     if (
 
-        model == FALLBACK_MODEL
-
-        and model != PRIMARY_MODEL
+        _uses_openrouter(model)
 
         and openrouter_key
 
@@ -378,25 +408,97 @@ def _exception_indicates_rate_limit(exc: BaseException) -> bool:
 
 
 
-def _configured_model_chain() -> list[str]:
+def _uses_openrouter(model: str) -> bool:
 
-    models: list[str] = []
-
-    for model in (PRIMARY_MODEL, FALLBACK_MODEL):
-
-        if model and model not in models:
-
-            models.append(model)
-
-    return models
+    return model == _OPENROUTER_SAFETY_MODEL
 
 
 
 
 
-def _max_tokens_for_chain_index(index: int) -> int | None:
+def _static_fallback_payload() -> dict[str, str]:
 
-    return _FALLBACK_MAX_TOKENS if index > 0 else None
+    return {
+
+        "text": LLM_STATIC_FALLBACK,
+
+        "source": STATIC_FALLBACK_SOURCE,
+
+    }
+
+
+
+
+
+def _static_fallback_message() -> AIMessage:
+
+    return AIMessage(
+
+        content=LLM_STATIC_FALLBACK,
+
+        additional_kwargs=_static_fallback_payload(),
+
+    )
+
+
+
+
+
+def _groq_failure_allows_fallback(exc: Exception) -> bool:
+
+    return is_direct_rate_limit_error(exc)
+
+
+
+
+
+def _exception_status_code(error: Exception) -> int | None:
+
+    status_code = getattr(error, "status_code", None)
+
+    if status_code is not None:
+
+        return int(status_code)
+
+
+
+    response = getattr(error, "response", None)
+
+    if response is not None:
+
+        response_status = getattr(response, "status_code", None)
+
+        if response_status is not None:
+
+            return int(response_status)
+
+
+
+    return None
+
+
+
+
+
+def is_openrouter_payment_error(error: Exception) -> bool:
+
+    if _exception_status_code(error) == 402:
+
+        return True
+
+
+
+    message = str(error).lower()
+
+    return "payment required" in message or "can only afford" in message
+
+
+
+
+
+def _openrouter_payment_fallback_message() -> AIMessage:
+
+    return AIMessage(content=LLM_OPENROUTER_PAYMENT_ERROR)
 
 
 
@@ -468,73 +570,45 @@ def _chunk_text(content) -> str:
 
 
 
-async def ainvoke_fallback_only(messages: Sequence[BaseMessage]) -> BaseMessage:
+async def ainvoke_classifier_llm(messages: Sequence[BaseMessage]) -> BaseMessage:
 
-    """Invoke configured fallback model(s) directly."""
+    """Intent routing is heuristic-only; never call an LLM for classification."""
 
-    models = _configured_model_chain()
-
-    if len(models) <= 1:
-
-        return await ainvoke_llm_with_fallback(messages)
-
-    return await _ainvoke_model_chain(messages, models[1:])
+    return AIMessage(content="general")
 
 
 
 
 
-async def astream_fallback_only(
+async def ainvoke_llm_with_fallback(
 
     messages: Sequence[BaseMessage],
-
-) -> AsyncIterator[str]:
-
-    """Stream configured fallback model(s) directly."""
-
-    models = _configured_model_chain()
-
-    if len(models) <= 1:
-
-        async for chunk in astream_llm_with_fallback(messages):
-
-            yield chunk
-
-        return
-
-    async for chunk in _astream_model_chain(messages, models[1:]):
-
-        yield chunk
-
-
-
-
-
-async def _ainvoke_model_chain(
-
-    messages: Sequence[BaseMessage],
-
-    models: list[str],
 
 ) -> BaseMessage:
 
-    for index, model in enumerate(models):
+    """
 
-        t0 = time.perf_counter()
+    One Groq call, then at most one OpenRouter call, then static fallback.
 
-        llm = get_llm(model=model, max_tokens=_FALLBACK_MAX_TOKENS)
+    """
+
+    t0 = time.perf_counter()
+
+    primary_exc: Exception | None = None
+
+    for attempt in range(_GROQ_429_MAX_RETRIES + 1):
+
+        primary = get_llm(model=PRIMARY_MODEL)
 
         try:
 
-            result = await llm.ainvoke(messages)
-
-            logger.info("Fallback model succeeded.")
+            result = await primary.ainvoke(messages)
 
             logger.info(
 
-                "LLM fallback %s → %.2fs",
+                "LLM primary %s → %.2fs",
 
-                model,
+                PRIMARY_MODEL,
 
                 time.perf_counter() - t0,
 
@@ -544,279 +618,117 @@ async def _ainvoke_model_chain(
 
         except Exception as exc:
 
-            if not is_direct_rate_limit_error(exc):
+            primary_exc = exc
 
-                logger.warning(
-
-                    "LLM %s failed (non-rate-limit) after %.2fs: %s",
-
-                    model,
-
-                    time.perf_counter() - t0,
-
-                    exc,
-
-                )
+            if is_llm_auth_error(exc):
 
                 raise
 
-            if index < len(models) - 1:
+            if is_direct_rate_limit_error(exc) and attempt < _GROQ_429_MAX_RETRIES:
 
                 logger.warning(
 
-                    "Primary model rate limited. Switching to fallback model.",
+                    "Groq rate limited (429); retrying in %.1fs (attempt %s/%s)",
+
+                    _GROQ_429_RETRY_DELAY,
+
+                    attempt + 1,
+
+                    _GROQ_429_MAX_RETRIES + 1,
 
                 )
 
+                await asyncio.sleep(_GROQ_429_RETRY_DELAY)
+
                 continue
 
-            logger.warning("Fallback model failed. Returning busy message.")
+            break
 
-            return AIMessage(content=LLM_RATE_LIMIT_BUSY)
+    if primary_exc is not None:
 
-    logger.warning("Fallback model failed. Returning busy message.")
+        elapsed = time.perf_counter() - t0
 
-    return AIMessage(content=LLM_RATE_LIMIT_BUSY)
+        if not _groq_failure_allows_fallback(primary_exc):
 
+            logger.warning(
 
+                "LLM primary %s failed after %.2fs: %s",
 
+                PRIMARY_MODEL,
 
+                elapsed,
 
-async def _astream_model_chain(
-
-    messages: Sequence[BaseMessage],
-
-    models: list[str],
-
-) -> AsyncIterator[str]:
-
-    for index, model in enumerate(models):
-
-        t0 = time.perf_counter()
-
-        llm = get_llm(
-
-            model=model,
-
-            max_tokens=_FALLBACK_MAX_TOKENS,
-
-            streaming=True,
-
-        )
-
-        try:
-
-            async for chunk in llm.astream(messages):
-
-                text = _chunk_text(chunk.content)
-
-                if text:
-
-                    yield text
-
-            logger.info("Fallback model succeeded.")
-
-            logger.info(
-
-                "LLM stream fallback %s → %.2fs",
-
-                model,
-
-                time.perf_counter() - t0,
+                primary_exc,
 
             )
 
-            return
+            raise primary_exc
 
-        except Exception as exc:
-
-            if not is_direct_rate_limit_error(exc):
-
-                logger.warning(
-
-                    "LLM stream %s failed (non-rate-limit) after %.2fs: %s",
-
-                    model,
-
-                    time.perf_counter() - t0,
-
-                    exc,
-
-                )
-
-                raise
-
-            if index < len(models) - 1:
-
-                logger.warning(
-
-                    "Primary model rate limited. Switching to fallback model.",
-
-                )
-
-                continue
-
-            logger.warning("Fallback model failed. Returning busy message.")
-
-            yield LLM_RATE_LIMIT_BUSY
-
-            return
-
-    logger.warning("Fallback model failed. Returning busy message.")
-
-    yield LLM_RATE_LIMIT_BUSY
+        logger.warning("Primary model rate limited. Switching to fallback model.")
 
 
 
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+
+    if not openrouter_key:
+
+        logger.warning("OpenRouter not configured. Returning static fallback.")
+
+        return _static_fallback_message()
 
 
-async def ainvoke_classifier_llm(messages: Sequence[BaseMessage]) -> BaseMessage:
 
-    """Fast intent-router call using LLM_CLASSIFIER_MODEL (default: 8b instant)."""
+    t1 = time.perf_counter()
 
-    t0 = time.perf_counter()
-
-    classifier = get_llm(model=CLASSIFIER_MODEL, max_tokens=32)
+    fallback = get_llm(model=_OPENROUTER_SAFETY_MODEL, max_tokens=_FALLBACK_MAX_TOKENS)
 
     try:
 
-        result = await classifier.ainvoke(messages)
+        result = await fallback.ainvoke(messages)
+
+        logger.info("Fallback model succeeded.")
 
         logger.info(
 
-            "LLM classifier %s → %.2fs",
+            "LLM fallback %s â†’ %.2fs",
 
-            CLASSIFIER_MODEL,
+            _OPENROUTER_SAFETY_MODEL,
 
-            time.perf_counter() - t0,
+            time.perf_counter() - t1,
 
         )
 
         return result
 
-    except Exception as exc:
+    except Exception as fallback_exc:
 
-        elapsed = time.perf_counter() - t0
-
-        if is_rate_limit_error(exc):
+        if is_openrouter_payment_error(fallback_exc):
 
             logger.warning(
 
-                "Classifier rate limited (%s) after %.2fs; intent falls back to 'general'",
+                "OpenRouter returned 402 Payment Required after %.2fs: %s",
 
-                CLASSIFIER_MODEL,
+                time.perf_counter() - t1,
 
-                elapsed,
+                fallback_exc,
 
             )
 
-            return AIMessage(content="general")
+            return _openrouter_payment_fallback_message()
 
         logger.warning(
 
-            "Classifier %s failed after %.2fs: %s",
+            "OpenRouter fallback failed after %.2fs: %s",
 
-            CLASSIFIER_MODEL,
+            time.perf_counter() - t1,
 
-            elapsed,
-
-            exc,
+            fallback_exc,
 
         )
 
-        raise
+        logger.warning("Fallback model failed. Returning static fallback.")
 
-
-
-
-
-async def ainvoke_llm_with_fallback(messages: Sequence[BaseMessage]) -> BaseMessage:
-
-    """
-
-    Invoke configured models in order. On direct HTTP 429 for a model, try the next.
-
-    Return LLM_RATE_LIMIT_BUSY only after every configured model is rate limited.
-
-    """
-
-    models = _configured_model_chain()
-
-    for index, model in enumerate(models):
-
-        t0 = time.perf_counter()
-
-        llm = get_llm(model=model, max_tokens=_max_tokens_for_chain_index(index))
-
-        try:
-
-            result = await llm.ainvoke(messages)
-
-            if index == 0:
-
-                logger.info(
-
-                    "LLM primary %s → %.2fs",
-
-                    model,
-
-                    time.perf_counter() - t0,
-
-                )
-
-            else:
-
-                logger.info("Fallback model succeeded.")
-
-                logger.info(
-
-                    "LLM fallback %s → %.2fs",
-
-                    model,
-
-                    time.perf_counter() - t0,
-
-                )
-
-            return result
-
-        except Exception as exc:
-
-            elapsed = time.perf_counter() - t0
-
-            if not is_direct_rate_limit_error(exc):
-
-                logger.warning(
-
-                    "LLM %s failed (non-rate-limit) after %.2fs: %s",
-
-                    model,
-
-                    elapsed,
-
-                    exc,
-
-                )
-
-                raise
-
-            if index < len(models) - 1:
-
-                logger.warning(
-
-                    "Primary model rate limited. Switching to fallback model.",
-
-                )
-
-                continue
-
-            logger.warning("Fallback model failed. Returning busy message.")
-
-            return AIMessage(content=LLM_RATE_LIMIT_BUSY)
-
-    logger.warning("Fallback model failed. Returning busy message.")
-
-    return AIMessage(content=LLM_RATE_LIMIT_BUSY)
+        return _static_fallback_message()
 
 
 
@@ -830,23 +742,107 @@ async def astream_llm_with_fallback(
 
     """
 
-    Stream configured models in order. On direct HTTP 429, continue with fallback stream.
+    One Groq stream, then at most one OpenRouter stream, then static fallback.
 
-    Yield LLM_RATE_LIMIT_BUSY only after every configured model is rate limited.
+    Never raise to the caller.
 
     """
 
-    models = _configured_model_chain()
-
-    for index, model in enumerate(models):
+    try:
 
         t0 = time.perf_counter()
 
-        llm = get_llm(
+        primary_exc: Exception | None = None
 
-            model=model,
+        for attempt in range(_GROQ_429_MAX_RETRIES + 1):
 
-            max_tokens=_max_tokens_for_chain_index(index),
+            primary = get_llm(model=PRIMARY_MODEL, streaming=True)
+
+            try:
+
+                async for chunk in primary.astream(messages):
+
+                    text = _chunk_text(chunk.content)
+
+                    if text:
+
+                        yield text
+
+                logger.info(
+
+                    "LLM stream primary %s → %.2fs",
+
+                    PRIMARY_MODEL,
+
+                    time.perf_counter() - t0,
+
+                )
+
+                return
+
+            except Exception as exc:
+
+                primary_exc = exc
+
+                if is_direct_rate_limit_error(exc) and attempt < _GROQ_429_MAX_RETRIES:
+
+                    logger.warning(
+
+                        "Groq stream rate limited (429); retrying in %.1fs (attempt %s/%s)",
+
+                        _GROQ_429_RETRY_DELAY,
+
+                        attempt + 1,
+
+                        _GROQ_429_MAX_RETRIES + 1,
+
+                    )
+
+                    await asyncio.sleep(_GROQ_429_RETRY_DELAY)
+
+                    continue
+
+                break
+
+        if primary_exc is not None:
+
+            if not _groq_failure_allows_fallback(primary_exc):
+
+                logger.warning(
+
+                    "LLM stream primary failed after %.2fs: %s",
+
+                    time.perf_counter() - t0,
+
+                    primary_exc,
+
+                )
+
+                yield LLM_STATIC_FALLBACK
+
+                return
+
+            logger.warning("Primary model rate limited. Switching to fallback model.")
+
+
+
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+
+        if not openrouter_key:
+
+            yield LLM_STATIC_FALLBACK
+
+            return
+
+
+
+        t1 = time.perf_counter()
+
+        fallback = get_llm(
+
+            model=_OPENROUTER_SAFETY_MODEL,
+
+            max_tokens=_FALLBACK_MAX_TOKENS,
 
             streaming=True,
 
@@ -854,7 +850,7 @@ async def astream_llm_with_fallback(
 
         try:
 
-            async for chunk in llm.astream(messages):
+            async for chunk in fallback.astream(messages):
 
                 text = _chunk_text(chunk.content)
 
@@ -862,73 +858,63 @@ async def astream_llm_with_fallback(
 
                     yield text
 
-            if index == 0:
+            logger.info("Fallback model succeeded.")
 
-                logger.info(
+            logger.info(
 
-                    "LLM stream primary %s → %.2fs",
+                "LLM stream fallback %s â†’ %.2fs",
 
-                    model,
+                _OPENROUTER_SAFETY_MODEL,
 
-                    time.perf_counter() - t0,
+                time.perf_counter() - t1,
 
-                )
-
-            else:
-
-                logger.info("Fallback model succeeded.")
-
-                logger.info(
-
-                    "LLM stream fallback %s → %.2fs",
-
-                    model,
-
-                    time.perf_counter() - t0,
-
-                )
+            )
 
             return
 
-        except Exception as exc:
+        except Exception as fallback_exc:
 
-            elapsed = time.perf_counter() - t0
-
-            if not is_direct_rate_limit_error(exc):
+            if is_openrouter_payment_error(fallback_exc):
 
                 logger.warning(
 
-                    "LLM stream %s failed (non-rate-limit) after %.2fs: %s",
+                    "OpenRouter stream returned 402 Payment Required after %.2fs: %s",
 
-                    model,
+                    time.perf_counter() - t1,
 
-                    elapsed,
-
-                    exc,
+                    fallback_exc,
 
                 )
 
-                raise
+                yield LLM_OPENROUTER_PAYMENT_ERROR
 
-            if index < len(models) - 1:
+                return
 
-                logger.warning(
+            logger.warning(
 
-                    "Primary model rate limited. Switching to fallback model.",
+                "OpenRouter stream fallback failed after %.2fs: %s",
 
-                )
+                time.perf_counter() - t1,
 
-                continue
+                fallback_exc,
 
-            logger.warning("Fallback model failed. Returning busy message.")
+            )
 
-            yield LLM_RATE_LIMIT_BUSY
+            yield LLM_STATIC_FALLBACK
 
-            return
+    except Exception as exc:
 
-    logger.warning("Fallback model failed. Returning busy message.")
+        logger.warning(
 
-    yield LLM_RATE_LIMIT_BUSY
+            "LLM stream pipeline failed; returning static fallback: %s",
+
+            exc,
+
+        )
+
+        yield LLM_STATIC_FALLBACK
+
+
 
 
 
@@ -958,16 +944,14 @@ Your purpose is to help university students, faculty, and admins with ERP querie
 
 CRITICAL IDENTITY RULES:
 
-1. You are TAIA — the AI assistant. You are NOT the user.
+1. You are TAIA â€” the AI assistant. You are NOT the user.
 
 2. Never confuse yourself with the logged-in user. Never say you are the user or use the user's name as your own.
 
-3. When the user asks about YOU ("Who are you?", "Tell me about yourself", "What is your name?" meaning the bot), answer ONLY what was asked — do not volunteer a full introduction unless they explicitly request one.
+3. When the user asks about YOU ("Who are you?", "Tell me about yourself", "What is your name?" meaning the bot), answer ONLY what was asked â€” do not volunteer a full introduction unless they explicitly request one.
 
-4. When the user asks about THEMSELVES ("Who am I?", "What is my name?", "What is my profile?"), their session data will be provided separately in that turn only — use it then, not otherwise.
+4. When the user asks about THEMSELVES ("Who am I?", "What is my name?", "What is my profile?"), their session data will be provided separately in that turn only â€” use it then, not otherwise.
 
 5. Be polite, professional, and accurate. Never reveal one user's data to another user.
 
 """
-
-

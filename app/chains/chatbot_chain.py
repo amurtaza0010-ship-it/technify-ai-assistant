@@ -23,7 +23,6 @@ from app.services.llm import (
     LLM_CONNECTION_ERROR,
     TAIA_IDENTITY_SYSTEM,
     ainvoke_llm_with_fallback,
-    ainvoke_classifier_llm,
     astream_llm_with_fallback,
     get_llm,
     is_llm_auth_error,
@@ -736,8 +735,8 @@ async def classify_intent_async(
     user_context: Optional[dict] = None,
 ) -> str:
     """
-    Use an LLM to classify the user's intent based on the message and conversation history.
-    Used by main.py to decide which ERP endpoint to call before LLM.
+    Classify intent using heuristic/keyword routing only (no LLM).
+    Used by main.py to decide which ERP endpoint to call before response generation.
     """
     t0 = time.perf_counter()
     heuristic = _heuristic_intent(message, role)
@@ -750,110 +749,13 @@ async def classify_intent_async(
         )
         return resolved
 
-    try:
-        messages, _ = _get_history(session_id)
-        
-        # Extract the last 3 user/AI exchanges to provide context
-        recent_history = []
-        for msg in messages[-6:]:
-            if isinstance(msg, HumanMessage):
-                recent_history.append(f"User: {msg.content}")
-            elif isinstance(msg, AIMessage):
-                recent_history.append(f"AI: {msg.content}")
-                
-        history_text = "\n".join(recent_history)
-        
-        # Define valid intents based on role
-        role_lower = role.lower().replace(" ", "_")
-        if role_lower == 'faculty':
-            valid_list = FACULTY_INTENTS
-        elif role_lower == 'admin':
-            valid_list = ADMIN_INTENTS
-        elif role_lower in ('finance', 'finance_officer'):
-            valid_list = FINANCE_OFFICER_INTENTS
-        elif role_lower == 'exam_officer':
-            valid_list = EXAM_OFFICER_INTENTS
-        else:
-            valid_list = STUDENT_INTENTS
-        
-        prompt = f"""You are an Intent Classifier for a University ERP AI Assistant.
-The user is a {role}.
-Your task is to classify the user's latest message into EXACTLY ONE of the following intents:
-{valid_list}
-
-Recent Conversation History:
-{history_text}
-
-Latest User Message: {message}
-
-Intent mapping guide:
-- attendance: attendance percentage, present/absent, class attendance
-- results: grades, marks, exam scores, transcript
-- gpa: CGPA, GPA, grade point average
-- courses: enrolled courses, registered subjects
-- timetable: class schedule, which classes on a day (Monday, Tuesday, etc.)
-- fees: own fee status, due amount (student's own fees only)
-- assignments: homework, pending assignments, due this week
-- exams: upcoming exams, next exam date, when is my exam (student's personal schedule ONLY)
-- study_plan: study schedule, how to prepare
-- policy: university rules, policies, regulations, examination rules, late submission, integrity, leave
-- faculty_attendance: faculty viewing student attendance in their courses
-- faculty_ungraded: ungraded assignments count
-- faculty_at_risk / at_risk_students: which students are at risk, in danger, failing (faculty/admin only)
-- peers_gpa: other students' GPA or grades (faculty/admin only)
-- faculty_courses: courses taught by faculty
-- faculty_performance: course performance, pass rate, average grade
-- admin_students: total student count, enrollment statistics
-- admin_admissions: admission statistics by year
-- admin_fees: fee collection stats, total expected/collected
-- admin_departments: department-wise student/CGPA stats
-- department_stats: department-wise student counts or enrollment breakdown (faculty/admin only)
-- admin_at_risk: university-wide at-risk students list
-- admin_overall: total enrollment, total faculty
-- admin_finance_department: department-wise fee collection (CS, Business, etc.)
-- admin_finance_pending: students with pending fees
-- admin_finance_scholarship: scholarship statistics
-- admin_finance_summary: total revenue, pending revenue, expenses
-- ai_identity: questions about TAIA the bot — name, university, who built you, what can you do, OR full intro ("who are you", "tell me about yourself")
-- greeting: hi, hello, hey, how are you, good morning — casual small talk only
-- profile: who am I, what is MY profile, my department, my email (questions about the logged-in user)
-- name: what is MY name, tell me MY name (the user's name only)
-- general: other unrelated questions (not greetings, bot identity, or user profile)
-
-Rules:
-1. Output ONLY the exact intent string from the list above. Do not output quotes or extra text.
-2. "Hi" / "Hello" / "How are you?" → greeting (NOT ai_identity).
-3. "What is your name?" / "What university?" / "Name of your university?" → ai_identity (brief bot question, NOT full intro).
-4. "Tell me about yourself" / "Who are you?" / "Introduce yourself" → ai_identity (full intro request).
-5. "Who am I?" / "What is my name?" / "my profile" → profile or name (about the user).
-6. "What are the examination rules?" / "exam regulations" → policy (NOT exams).
-7. exams intent is ONLY for students asking about THEIR upcoming exam schedule (dates/times).
-8. Admin, Faculty, and Exam Officer asking about rules → policy.
-9. If the user asks a follow-up about ERP data, use conversation history to pick the ERP intent.
-10. Students asking about finance reports → admin_finance_summary (access will be denied).
-11. "Department wise students" / "students per department" / "department statistics" → department_stats (NOT profile).
-12. Students asking about other students or university-wide lists → admin_at_risk or faculty intents (access will be denied for students).
-13. Faculty cannot access admin reports or individual student ERP records outside their courses.
-14. If no intent matches, output 'general'.
-
-Intent:"""
-
-        response = await ainvoke_classifier_llm([HumanMessage(content=prompt)])
-        intent = response.content.strip().strip("'\"").lower()
-        if intent not in valid_list:
-            intent = "general"
-        resolved = _resolve_intent_for_role(intent, role, message)
-        logger.info(
-            "Chain classify_intent (llm=%s) → %.2fs",
-            resolved,
-            time.perf_counter() - t0,
-        )
-        return resolved
-    except Exception as e:
-        print(f"Intent Classification Error: {e}")
-        if is_department_stats_query(message):
-            return "department_stats"
-        return 'general'
+    resolved = _resolve_intent_for_role("general", role, message)
+    logger.info(
+        "Chain classify_intent (heuristic=miss → %s) → %.2fs",
+        resolved,
+        time.perf_counter() - t0,
+    )
+    return resolved
 
 
 # ── Step 7: Contextual response with ERP data ─────────────────────────────────
