@@ -8,6 +8,7 @@ const ADMIN_TEST_EMAIL = "admin@technify.edu";
 const ADMIN_TEST_PASSWORD = "admin123";
 const ADMIN_USER_ID = "ADM-0001";
 const AUTO_REFRESH_MS = 15000;
+const RAG_MODE_KEY = "admin_rag_mode";
 
 let allLogs = [];
 let refreshInterval = null;
@@ -21,6 +22,7 @@ window.onload = function () {
   if (adminJwt) {
     fetchLogs();
     startAutoRefresh();
+    initRagPanel();
   }
 };
 
@@ -61,6 +63,13 @@ function parseJwtPayload(token) {
   } catch {
     return null;
   }
+}
+
+function toggleSidebar() {
+  const sidebar = document.getElementById("sidebar");
+  const overlay = document.getElementById("sidebarOverlay");
+  if (sidebar) sidebar.classList.toggle("open");
+  if (overlay) overlay.classList.toggle("open");
 }
 
 function initSidebar() {
@@ -110,7 +119,7 @@ function updateLoginPanel() {
     loginPanel.style.display = "none";
     dashboardContent.style.display = "block";
   } else {
-    loginPanel.style.display = "block";
+    loginPanel.style.display = "flex";
     dashboardContent.style.display = "none";
   }
 }
@@ -463,5 +472,197 @@ async function fetchLogs(silent = false) {
     applyFilters();
   } catch (error) {
     tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #ef4444;">Error fetching logs: ${error.message}</td></tr>`;
+  }
+}
+
+// ── Admin RAG (hybrid search over uploaded ERP data) ─────────────────────────
+
+function isRagModeEnabled() {
+  return localStorage.getItem(RAG_MODE_KEY) === "true";
+}
+
+function setRagModeEnabled(enabled) {
+  localStorage.setItem(RAG_MODE_KEY, enabled ? "true" : "false");
+}
+
+function updateRagChatVisibility() {
+  const section = document.getElementById("ragChatSection");
+  if (section) {
+    section.style.display = isRagModeEnabled() ? "block" : "none";
+  }
+}
+
+function setRagStatus(message, type = "") {
+  const el = document.getElementById("ragUploadStatus");
+  if (!el) return;
+  el.textContent = message;
+  el.className = "rag-status" + (type ? ` ${type}` : "");
+}
+
+async function initRagPanel() {
+  const toggle = document.getElementById("ragModeToggle");
+  if (toggle) {
+    toggle.checked = isRagModeEnabled();
+  }
+  updateRagChatVisibility();
+
+  if (!adminJwt) return;
+
+  try {
+    const response = await fetch(`${FASTAPI_URL}/api/v1/admin/rag/status`, {
+      headers: { Authorization: `Bearer ${adminJwt}` },
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (data.documents_indexed > 0) {
+        setRagStatus(
+          `${data.documents_indexed} document(s) indexed for RAG (hybrid BM25 + vector).`,
+          "success"
+        );
+      }
+    }
+  } catch (err) {
+    console.warn("RAG status check failed:", err);
+  }
+}
+
+function onRagModeToggle() {
+  const toggle = document.getElementById("ragModeToggle");
+  setRagModeEnabled(!!toggle?.checked);
+  updateRagChatVisibility();
+  if (toggle?.checked) {
+    setRagStatus("RAG mode enabled — questions below use uploaded ERP data.", "success");
+  } else {
+    setRagStatus("RAG mode disabled — use Main Chat for mock ERP queries.");
+  }
+}
+
+async function handleRagUpload(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file || !adminJwt) return;
+
+  const allowed = [".csv", ".xlsx", ".json", ".pdf", ".docx"];
+  const lower = file.name.toLowerCase();
+  if (!allowed.some((ext) => lower.endsWith(ext))) {
+    setRagStatus("Please upload a .csv, .xlsx, .json, .pdf, or .docx file.", "error");
+    return;
+  }
+
+  setRagStatus("Uploading and indexing…");
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const response = await fetch(`${FASTAPI_URL}/api/v1/admin/rag/upload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${adminJwt}` },
+      body: formData,
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || "Upload failed");
+    }
+    setRagStatus(
+      `Success: ${data.documents_indexed} row(s) indexed (dense + BM25).`,
+      "success"
+    );
+    const toggle = document.getElementById("ragModeToggle");
+    if (toggle) {
+      toggle.checked = true;
+      onRagModeToggle();
+    }
+  } catch (err) {
+    setRagStatus(`Upload error: ${err.message}`, "error");
+  }
+}
+
+function appendRagMessage(text, role) {
+  const container = document.getElementById("ragChatMessages");
+  if (!container) return null;
+  const div = document.createElement("div");
+  div.className = `rag-msg ${role}`;
+  div.textContent = text;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return div;
+}
+
+async function sendRagQuery(event) {
+  event.preventDefault();
+  if (!isRagModeEnabled()) {
+    setRagStatus("Enable RAG Mode to query uploaded data.", "error");
+    return;
+  }
+
+  const input = document.getElementById("ragChatInput");
+  const sendBtn = document.getElementById("ragSendBtn");
+  const msg = (input?.value || "").trim();
+  if (!msg || !adminJwt) return;
+
+  appendRagMessage(msg, "user");
+  input.value = "";
+  if (sendBtn) sendBtn.disabled = true;
+
+  const assistantEl = appendRagMessage("…", "assistant");
+  let fullText = "";
+
+  try {
+    const response = await fetch(`${FASTAPI_URL}/api/v1/chat/rag`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminJwt}`,
+        "x-session-id": `admin_rag_${Date.now()}`,
+      },
+      body: JSON.stringify({ message: msg }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || "RAG query failed");
+    }
+    if (!response.body) {
+      throw new Error("No response body");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const payload = line.slice(6).trim();
+        if (payload === "[DONE]") continue;
+        let data;
+        try {
+          data = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+        if (data.text) {
+          fullText += data.text;
+          if (assistantEl) assistantEl.textContent = fullText;
+        }
+      }
+    }
+
+    if (!fullText && assistantEl) {
+      assistantEl.textContent = "No response received.";
+    }
+  } catch (err) {
+    if (assistantEl) {
+      assistantEl.textContent = `Error: ${err.message}`;
+    }
+  } finally {
+    if (sendBtn) sendBtn.disabled = false;
   }
 }

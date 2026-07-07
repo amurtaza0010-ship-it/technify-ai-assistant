@@ -74,6 +74,23 @@ class Settings:
 
     LLM_MODEL: str = LLM_PRIMARY_MODEL
 
+    # Admin RAG (hybrid search over uploaded ERP data)
+    CHROMA_COLLECTION_ADMIN: str = os.getenv("CHROMA_COLLECTION_ADMIN", "admin_erp_data")
+    ADMIN_RAG_PERSIST_DIR: str = os.getenv(
+        "ADMIN_RAG_PERSIST_DIR",
+        os.path.join(os.path.dirname(__file__), "..", "data", "admin_rag_store"),
+    )
+    ADMIN_BM25_INDEX_PATH: str = os.getenv(
+        "ADMIN_BM25_INDEX_PATH",
+        os.path.join(
+            os.getenv(
+                "ADMIN_RAG_PERSIST_DIR",
+                os.path.join(os.path.dirname(__file__), "..", "data", "admin_rag_store"),
+            ),
+            "bm25_index.pkl",
+        ),
+    )
+
 
 
 

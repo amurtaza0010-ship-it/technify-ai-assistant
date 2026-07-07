@@ -156,7 +156,40 @@ async def get_faculty_teaching(faculty_id: str) -> dict:
 
 
 async def get_student_instructors(student_id: str) -> dict:
-    return await _get(f"/student/{student_id}/instructors")
+    """Return instructors for the student's enrolled courses.
+
+    Uses the same /student/{id}/courses response as the `courses` intent so both
+    queries always see an identical course list.
+    """
+    courses_data = await get_student_courses(student_id)
+    raw_courses = courses_data.get("courses", [])
+    if not isinstance(raw_courses, list):
+        raw_courses = []
+
+    courses_out = []
+    for course in raw_courses:
+        if not isinstance(course, dict):
+            continue
+        instructor = course.get("instructor") or course.get("faculty_name") or ""
+        courses_out.append({
+            "course_id": course.get("course_id"),
+            "course_name": course.get("course_name", ""),
+            "course_code": course.get("course_code", ""),
+            "instructor": instructor,
+        })
+
+    logger.info(
+        "student_instructors: %d course(s) for %s (source=/student/%s/courses, "
+        "same as courses intent)",
+        len(courses_out),
+        student_id,
+        student_id,
+    )
+    return {
+        "student_id": student_id,
+        "courses": courses_out,
+        "total_courses": len(courses_out),
+    }
 
 
 async def get_admin_salary_unpaid() -> list:
@@ -237,16 +270,30 @@ async def get_all_faculty_at_risk(faculty_id: str) -> dict:
         compact_students = []
         for student in source_students:
             if isinstance(student, dict) and student.get("student_id"):
-                reason = student.get("reason", "")
-                # Determine if it's low attendance based on available fields
-                if student.get("attendance_percentage", 100) < 75:
-                    reason = reason or "Low attendance"
-                elif student.get("gpa", 4.0) < 2.5:
-                    reason = reason or "Academic performance (GPA)"
+                # Prefer an explicit reason/remarks field; derive one from numeric fields
+                # when neither is set. Note: mock ERP uses capital "GPA" and "remarks".
+                reason = (
+                    student.get("reason", "")
+                    or student.get("remarks", "")
+                )
+                if not reason:
+                    att_pct = student.get("attendance_percentage")
+                    gpa_val = student.get("GPA") or student.get("gpa")
+                    total_pct = student.get("total") or student.get("avg_percentage")
+                    if att_pct is not None and float(att_pct) < 75:
+                        reason = "Low attendance"
+                    elif gpa_val is not None and float(gpa_val) < 2.5:
+                        reason = "Academic performance (GPA)"
+                    elif total_pct is not None and float(total_pct) < 50:
+                        reason = "Failing grades"
                 compact_students.append({
                     "student_id": student["student_id"],
                     "student_name": student.get("student_name") or student.get("name", ""),
-                    "reason": reason
+                    "reason": reason,
+                    "attendance_percentage": student.get("attendance_percentage"),
+                    "GPA": student.get("GPA") or student.get("gpa"),
+                    "avg_percentage": student.get("total") or student.get("avg_percentage"),
+                    "current_grade": student.get("current_grade"),
                 })
 
         if not compact_students:
@@ -631,10 +678,10 @@ async def fetch_erp_data(intent: str, uid: str, role: str, message: str) -> Tupl
         else:
             return "", False
 
-        # For faculty_at_risk and faculty_ungraded, skip trim because we already formatted cleanly
-        if intent in ("faculty_at_risk", "faculty_ungraded"):
-            return json.dumps(data), False
-
+        # Compress as early as possible so large faculty ERP payloads (e.g. 10 courses
+        # worth of students) never travel further than they have to. Safe to call again
+        # downstream in chatbot_chain.py — trim_erp_payload_for_llm is idempotent once a
+        # payload is marked "_compressed_for_llm".
         data = trim_erp_payload_for_llm(data, intent, message)
         return json.dumps(data), False
     except Exception as exc:

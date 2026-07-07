@@ -2,7 +2,7 @@
 
 LLM client configuration for TAIA.
 
-Architecture: Groq primary → static message on failure or rate limit.
+Architecture: Groq primary → OpenRouter fallback → Gemini Flash fallback (multi‑model) → static message on failure.
 
 """
 
@@ -14,6 +14,8 @@ import os
 
 import re
 
+import threading
+
 import time
 
 from collections import deque
@@ -23,6 +25,8 @@ from collections.abc import AsyncIterator
 from datetime import date
 
 from typing import Sequence
+
+import google.generativeai as genai
 
 import httpx
 
@@ -40,10 +44,10 @@ load_dotenv()
 
 logger = logging.getLogger("taia.llm")
 
-logger.info("LLM Mode: Groq primary | static fallback")
+logger.info("LLM Mode: Groq primary | OpenRouter fallback | Gemini Flash fallback")
 
 
-GROQ_PRIMARY_MODEL = os.getenv("GROQ_PRIMARY_MODEL", "llama-3.3-70b-versatile")
+GROQ_PRIMARY_MODEL = os.getenv("GROQ_PRIMARY_MODEL", "llama-3.1-8b-instant")
 
 _GROQ_DAILY_TOKEN_BUDGET = int(os.getenv("GROQ_DAILY_TOKEN_BUDGET", "1000000"))
 
@@ -86,15 +90,57 @@ _settings = get_settings()
 
 PRIMARY_MODEL = _settings.LLM_PRIMARY_MODEL or GROQ_PRIMARY_MODEL
 
-FALLBACK_MODEL = _settings.LLM_FALLBACK_MODEL
-
 MAIN_MODEL = PRIMARY_MODEL
 
-CLASSIFIER_MODEL = os.getenv("LLM_CLASSIFIER_MODEL", FALLBACK_MODEL)
+# ── OpenRouter fallback ──
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
+# ── Gemini fallback: try multiple models if the first one hits its quota ──
+GEMINI_FALLBACK_MODELS = [
+    os.getenv("GEMINI_MODEL", "models/gemini-2.0-flash"),
+    "models/gemini-2.5-flash",
+]
 
 _api_key_checked = False
 
 _groq_cache: dict[tuple, ChatOpenAI] = {}
+
+_openrouter_client: ChatOpenAI | None = None
+
+
+def _get_openrouter_client() -> ChatOpenAI:
+    """Return a ChatOpenAI client pointed at OpenRouter."""
+    global _openrouter_client
+    if _openrouter_client is not None:
+        return _openrouter_client
+    if not OPENROUTER_API_KEY:
+        raise ValueError("OPENROUTER_API_KEY is not configured")
+    _openrouter_client = ChatOpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url=OPENROUTER_BASE_URL,
+        model=OPENROUTER_MODEL,
+        temperature=float(os.getenv("LLM_TEMPERATURE", "0.3")),
+        streaming=False,
+        max_retries=0,
+        timeout=30.0,
+    )
+    return _openrouter_client
+
+
+def _get_openrouter_streaming_client() -> ChatOpenAI:
+    """Return a streaming ChatOpenAI client pointed at OpenRouter."""
+    client = ChatOpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url=OPENROUTER_BASE_URL,
+        model=OPENROUTER_MODEL,
+        temperature=float(os.getenv("LLM_TEMPERATURE", "0.3")),
+        streaming=True,
+        max_retries=0,
+        timeout=30.0,
+    )
+    return client
 
 
 def _resolve_groq_api_key() -> str | None:
@@ -440,6 +486,123 @@ def _chunk_text(content) -> str:
     return str(content) if content else ""
 
 
+# ── OpenRouter fallback helpers ──
+
+async def _ainvoke_openrouter_fallback(messages: Sequence[BaseMessage]) -> AIMessage | None:
+    """Invoke OpenRouter GPT-4o-mini for non-streaming."""
+    if not OPENROUTER_API_KEY:
+        logger.warning("OpenRouter fallback skipped: no API key")
+        return None
+    try:
+        logger.info("Switching to OpenRouter fallback: %s", OPENROUTER_MODEL)
+        client = _get_openrouter_client()
+        response = await client.ainvoke(list(messages))
+        return AIMessage(content=_chunk_text(response.content))
+    except Exception as exc:
+        logger.warning("OpenRouter fallback failed: %s", exc)
+        return None
+
+
+async def stream_openrouter_fallback(messages: Sequence[BaseMessage]) -> AsyncIterator[str]:
+    """Stream OpenRouter GPT-4o-mini response chunks."""
+    if not OPENROUTER_API_KEY:
+        logger.warning("OpenRouter fallback skipped: no API key")
+        return
+    try:
+        logger.info("Switching to OpenRouter fallback stream: %s", OPENROUTER_MODEL)
+        client = _get_openrouter_streaming_client()
+        async for chunk in client.astream(list(messages)):
+            text = _chunk_text(chunk.content)
+            if text:
+                yield text
+    except Exception as exc:
+        logger.warning("OpenRouter stream fallback failed: %s", exc)
+
+
+# ── Gemini fallback helpers ──
+
+def _messages_to_gemini_prompt(messages: Sequence[BaseMessage]) -> str:
+    parts: list[str] = []
+    for msg in messages:
+        cls_name = type(msg).__name__
+        if cls_name == "SystemMessage":
+            role = "system"
+        elif cls_name == "AIMessage":
+            role = "assistant"
+        else:
+            role = "user"
+        content = _chunk_text(getattr(msg, "content", ""))
+        if content:
+            parts.append(f"{role.upper()}: {content}")
+    return "\n\n".join(parts)
+
+
+async def stream_gemini_fallback(messages: Sequence[BaseMessage]) -> AsyncIterator[str]:
+    """Stream Gemini Flash response, trying multiple models on failure."""
+    prompt = _messages_to_gemini_prompt(messages)
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not configured")
+
+    for model_name in GEMINI_FALLBACK_MODELS:
+        logger.info("Switching to Gemini fallback: %s", model_name)
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(model_name)
+
+            if hasattr(model, "generate_content_async"):
+                response = await model.generate_content_async(prompt, stream=True)
+                async for chunk in response:
+                    text = getattr(chunk, "text", None) or ""
+                    if text:
+                        yield text
+                return
+            else:
+                loop = asyncio.get_running_loop()
+                queue: asyncio.Queue = asyncio.Queue()
+                _sentinel = object()
+
+                def _producer() -> None:
+                    try:
+                        for chunk in model.generate_content(prompt, stream=True):
+                            text = getattr(chunk, "text", None) or ""
+                            if text:
+                                loop.call_soon_threadsafe(queue.put_nowait, text)
+                    except Exception as exc:
+                        loop.call_soon_threadsafe(queue.put_nowait, exc)
+                    finally:
+                        loop.call_soon_threadsafe(queue.put_nowait, _sentinel)
+
+                threading.Thread(target=_producer, daemon=True).start()
+
+                while True:
+                    item = await queue.get()
+                    if item is _sentinel:
+                        break
+                    if isinstance(item, Exception):
+                        raise item
+                    yield item
+                return
+        except Exception as exc:
+            logger.warning("Gemini model %s failed: %s", model_name, exc)
+            continue
+
+    logger.warning("All Gemini fallback models failed")
+
+
+async def _ainvoke_gemini_fallback(messages: Sequence[BaseMessage]) -> AIMessage | None:
+    try:
+        parts: list[str] = []
+        async for text in stream_gemini_fallback(messages):
+            parts.append(text)
+        content = "".join(parts)
+        if content.strip():
+            return AIMessage(content=content)
+    except Exception as exc:
+        logger.warning("Gemini fallback failed: %s", exc)
+    return None
+
+
 def _reset_token_counter_if_new_day() -> None:
 
     global _groq_tokens_used_today, _groq_token_day
@@ -531,7 +694,8 @@ def _groq_tpm_would_be_exceeded(messages: Sequence[BaseMessage]) -> bool:
     estimated = _estimate_tokens(messages)
     if _would_exceed_tpm(estimated):
         logger.info(
-            "TPM limit would be exceeded (estimated=%s, current=%s, limit=%s); returning static fallback",
+            "TPM limit would be exceeded (estimated=%s, current=%s, limit=%s); "
+            "pre‑emptively falling back",
             estimated,
             _current_tpm(),
             _TPM_LIMIT,
@@ -567,13 +731,34 @@ async def ainvoke_llm_with_fallback(
 
 ) -> BaseMessage:
 
-    """Groq primary; static message on budget limit or Groq failure after retries."""
+    """Groq primary → OpenRouter → Gemini → static message."""
 
+    # Daily budget exceeded → skip Groq, go to OpenRouter
     if _groq_token_budget_exceeded(messages):
+        or_result = await _ainvoke_openrouter_fallback(messages)
+        if or_result is not None:
+            return or_result
+        gemini_result = await _ainvoke_gemini_fallback(messages)
+        return gemini_result or AIMessage(content=LLM_STATIC_FALLBACK)
 
-        return AIMessage(content=LLM_STATIC_FALLBACK)
+    # Pre‑emptively fall back when TPM would be exceeded
+    if _groq_tpm_would_be_exceeded(messages):
+        logger.info("Pre‑emptively falling back due to TPM limit")
+        or_result = await _ainvoke_openrouter_fallback(messages)
+        if or_result is not None:
+            return or_result
+        gemini_result = await _ainvoke_gemini_fallback(messages)
+        return gemini_result or AIMessage(content=LLM_STATIC_FALLBACK)
 
     t0 = time.perf_counter()
+
+    estimated = _estimate_tokens(messages)
+    total_chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
+    logger.info(
+        "Groq request: ~%d tokens (~%.1f KB prompt)",
+        estimated,
+        total_chars / 1024,
+    )
 
     groq = get_llm(model=PRIMARY_MODEL)
 
@@ -659,7 +844,7 @@ async def ainvoke_llm_with_fallback(
 
     logger.warning(
 
-        "Groq rate limited or unavailable after %.2fs (%s); returning static fallback.",
+        "Groq rate limited or unavailable after %.2fs (%s); trying OpenRouter fallback.",
 
         time.perf_counter() - t0,
 
@@ -667,7 +852,14 @@ async def ainvoke_llm_with_fallback(
 
     )
 
-    return AIMessage(content=LLM_STATIC_FALLBACK)
+    or_result = await _ainvoke_openrouter_fallback(messages)
+    if or_result is not None:
+        return or_result
+
+    logger.info("OpenRouter fallback failed; trying Gemini fallback.")
+    gemini_result = await _ainvoke_gemini_fallback(messages)
+
+    return gemini_result or AIMessage(content=LLM_STATIC_FALLBACK)
 
 
 async def astream_llm_with_fallback(
@@ -676,15 +868,52 @@ async def astream_llm_with_fallback(
 
 ) -> AsyncIterator[str]:
 
-    """Groq stream primary; static message on budget limit or Groq failure after retries."""
+    """Groq stream primary → OpenRouter → Gemini → static message."""
 
+    # Daily budget exceeded → skip Groq, go to OpenRouter
     if _groq_token_budget_exceeded(messages):
-
+        try:
+            async for text in stream_openrouter_fallback(messages):
+                yield text
+            return
+        except Exception as exc:
+            logger.warning("OpenRouter stream fallback failed: %s", exc)
+        try:
+            async for text in stream_gemini_fallback(messages):
+                yield text
+            return
+        except Exception as exc:
+            logger.warning("Gemini stream fallback failed: %s", exc)
         yield LLM_STATIC_FALLBACK
+        return
 
+    # Pre‑emptively fall back when TPM would be exceeded
+    if _groq_tpm_would_be_exceeded(messages):
+        logger.info("Pre‑emptively falling back due to TPM limit")
+        try:
+            async for text in stream_openrouter_fallback(messages):
+                yield text
+            return
+        except Exception as exc:
+            logger.warning("OpenRouter stream fallback failed: %s", exc)
+        try:
+            async for text in stream_gemini_fallback(messages):
+                yield text
+            return
+        except Exception as exc:
+            logger.warning("Gemini stream fallback failed: %s", exc)
+        yield LLM_STATIC_FALLBACK
         return
 
     t0 = time.perf_counter()
+
+    estimated = _estimate_tokens(messages)
+    total_chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
+    logger.info(
+        "Groq stream request: ~%d tokens (~%.1f KB prompt)",
+        estimated,
+        total_chars / 1024,
+    )
 
     groq = get_llm(model=PRIMARY_MODEL, streaming=True)
 
@@ -784,13 +1013,32 @@ async def astream_llm_with_fallback(
 
     logger.warning(
 
-        "Groq stream rate limited or unavailable after %.2fs (%s); returning static fallback.",
+        "Groq stream rate limited or unavailable after %.2fs (%s); trying OpenRouter fallback.",
 
         time.perf_counter() - t0,
 
         groq_exc,
 
     )
+
+    try:
+        async for text in stream_openrouter_fallback(messages):
+            yield text
+        return
+    except Exception as exc:
+        logger.warning("OpenRouter stream fallback failed: %s", exc)
+
+    try:
+
+        async for text in stream_gemini_fallback(messages):
+
+            yield text
+
+        return
+
+    except Exception as exc:
+
+        logger.warning("Gemini fallback failed: %s", exc)
 
     yield LLM_STATIC_FALLBACK
 
@@ -830,3 +1078,69 @@ CRITICAL IDENTITY RULES:
 5. Be polite, professional, and accurate. Never reveal one user's data to another user.
 
 """
+
+
+# Condensed system prompt used only for faculty analytical intents (faculty_attendance,
+# faculty_at_risk, faculty_ungraded, faculty_performance). These requests already embed a
+# sizeable ERP data summary in the human message, so the full TAIA_IDENTITY_SYSTEM persona
+# text is trimmed down here to keep total prompt tokens well under the Groq TPM limit.
+# Every other intent keeps using TAIA_IDENTITY_SYSTEM unchanged.
+TAIA_FACULTY_SYSTEM = """You are TAIA (Technify Academic AI Assistant) by Technify Software House. \
+You are a bot, NOT the user. Answer the faculty member's question using ONLY the \
+course/student data provided in this message. Be concise and accurate. Never reveal \
+another faculty member's or another student's unrelated private data.
+
+DATA PRESENTATION RULES (follow strictly):
+1. If the data contains a list of students (e.g. under "top_at_risk_students", \
+"top_low_attendance_students", or "top_ungraded_assignments"), ALWAYS present every student \
+in that list as a formatted bullet or numbered list. Never suppress or skip any student.
+2. For each student entry include: name, course, attendance% or grade (if available), \
+and reason. If the "reason" field is empty or null, write "Reason not specified" — \
+do NOT omit the student.
+3. NEVER respond with "there is no information", "no data available", or any similar \
+negative if student records exist in the data — even if individual fields are null.
+4. If a value is null or missing, write "N/A" for that field and move on.
+5. After listing all students, add one sentence summarising the total count."""
+
+
+# Condensed system prompt for admin analytical intents (admin_at_risk, admin_finance_pending).
+# Avoids the full TAIA_IDENTITY_SYSTEM token overhead when the human message already
+# contains a dense ERP data block.
+TAIA_ADMIN_SYSTEM = """You are TAIA (Technify Academic AI Assistant) by Technify Software House. \
+You are a bot, NOT the user. Answer the admin's question using ONLY the provided data. \
+Be concise and accurate.
+
+DATA RULES:
+1. Student or fee records live inside "summary" in the JSON data — list them all as a \
+numbered list.
+2. If any field is null or missing, write "N/A" for that field.
+3. Never say "no information" or "no data available" when records are present in the data.
+4. State the total count first, then list individual entries."""
+
+
+def build_rag_prompt(query: str, chunks: list) -> str:
+    """Build the admin RAG human-message prompt from hybrid-retrieved chunks."""
+    if chunks:
+        lines = []
+        for chunk in chunks:
+            if hasattr(chunk, "page_content") and hasattr(chunk, "metadata"):
+                page = chunk.metadata.get("page", "N/A")
+                content = chunk.page_content.strip()
+                lines.append(f"[Page {page}] {content}")
+            else:
+                lines.append(f"- {chunk}")
+        combined = "\n".join(lines)
+    else:
+        combined = "(no matching records retrieved)"
+    return (
+        "You are an AI assistant. Below are excerpts from uploaded documents.\n"
+        "- Answer the user's question using only these excerpts.\n"
+        "- Be concise; do not include unrelated information.\n"
+        "- Always cite the page number in parentheses at the end of each factual "
+        'statement, e.g., "(Page 9)".\n'
+        "- If the user asks for a reference or page number, reply ONLY with the exact "
+        "page number and the relevant sentence from the excerpt.\n"
+        '- If the answer is not found, say "Not found in the uploaded documents."\n\n'
+        f"Excerpts:\n{combined}\n\n"
+        f"User question: {query}"
+    )

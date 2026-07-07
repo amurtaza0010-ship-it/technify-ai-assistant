@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -11,14 +11,14 @@
             theme: {
                 extend: {
                     colors: {
-                        brand: { 500: '#10A37F', 600: '#0d8f6e' }
+                        brand: { 500: '#10B981', 600: '#059669' }
                     }
                 }
             }
         }
     </script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='widget.css') }}">
@@ -27,14 +27,14 @@
     <div class="app">
         <!-- Sidebar -->
         <aside class="sidebar" id="sidebar">
-            <div class="sidebar-top space-y-4 p-4">
-                <div class="flex items-center gap-3 border-b border-[var(--border-color)] pb-4">
-                    <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-brand-500 text-white">
+            <div class="sidebar-top">
+                <div class="sidebar-brand">
+                    <div class="sidebar-brand-icon">
                         <i class="fas fa-graduation-cap"></i>
                     </div>
-                    <div>
-                        <p class="text-sm font-semibold text-[var(--text-primary)]">TAIA Portal</p>
-                        <p class="text-xs text-[var(--text-secondary)]">Enterprise ERP</p>
+                    <div class="sidebar-brand-text">
+                        <p>TAIA Portal</p>
+                        <p>Enterprise ERP</p>
                     </div>
                 </div>
 
@@ -44,20 +44,20 @@
 
                 <div class="quick-questions" id="quickQuestions" style="display:none;">
                     <h4><i class="fas fa-bolt"></i> Quick Prompts</h4>
-                    <div id="questionsList" class="space-y-1"></div>
+                    <div id="questionsList"></div>
                 </div>
 
                 <div class="chat-history" id="chatHistory" style="display:none;">
-                    <h4 class="chat-history-heading">📜 Chat History</h4>
+                    <h4 class="chat-history-heading">Chat History</h4>
                     <ul id="chat-history-list" class="history-list">
                         <li class="history-empty">No history available</li>
                     </ul>
                 </div>
             </div>
 
-            <div class="sidebar-bottom space-y-2 p-4">
+            <div class="sidebar-bottom">
                 <button class="theme-toggle" onclick="toggleTheme()" id="themeToggleBtn">
-                    <i class="fas fa-sun"></i> Light Mode
+                    <i class="fas fa-moon"></i> Dark Mode
                 </button>
                 <a href="/admin" class="block">
                     <button class="theme-toggle admin-link-btn">
@@ -100,10 +100,20 @@
         <!-- Main Chat Area -->
         <main class="chat-area">
             <div class="chat-header">
-                <button class="menu-btn" onclick="toggleSidebar()"><i class="fas fa-bars"></i></button>
-                <div class="header-title">
-                    <h2>TAIA <span>Auto-Router</span></h2>
-                    <p class="header-subtitle">Academic Intelligence Assistant</p>
+                <div class="chat-header-left">
+                    <button class="menu-btn" onclick="toggleSidebar()"><i class="fas fa-bars"></i></button>
+                    <div class="header-title">
+                        <h2>TAIA <span class="router-badge">Auto Router</span></h2>
+                        <p class="header-subtitle">Academic Intelligent Assistant</p>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <button class="header-action-btn" title="Notifications" type="button">
+                        <i class="fas fa-bell"></i>
+                    </button>
+                    <button class="header-action-btn" title="Settings" type="button">
+                        <i class="fas fa-cog"></i>
+                    </button>
                 </div>
             </div>
 
@@ -114,15 +124,31 @@
                     </div>
                     <h2>How can I help you today?</h2>
                     <p class="subtitle">Login from the sidebar to access your personalized academic dashboard.</p>
+                    <div class="welcome-chips">
+                        <button class="prompt-chip" type="button" onclick="fillPrompt('What is my attendance?')">Attendance</button>
+                        <button class="prompt-chip" type="button" onclick="fillPrompt('What is my GPA?')">Results</button>
+                        <button class="prompt-chip" type="button" onclick="fillPrompt('Show my fee status')">Fee</button>
+                        <button class="prompt-chip" type="button" onclick="fillPrompt('Show my registered courses')">Courses</button>
+                        <button class="prompt-chip" type="button" onclick="fillPrompt('Show my timetable')">Timetable</button>
+                        <button class="prompt-chip" type="button" onclick="fillPrompt('Generate a study plan')">Study Plan</button>
+                        <button class="prompt-chip" type="button" onclick="fillPrompt('Show my transcript')">Transcript</button>
+                        <button class="prompt-chip" type="button" onclick="fillPrompt('How do I apply for leave?')">Leave Application</button>
+                    </div>
                 </div>
             </div>
 
             <div class="input-area">
                 <div class="input-container">
-                    <div class="input-wrapper bg-[var(--bg-input)] border border-[var(--border-color)]">
+                    <div class="input-wrapper">
+                        <button class="input-action-btn" type="button" title="Attach file">
+                            <i class="fas fa-paperclip"></i>
+                        </button>
                         <textarea id="msgInput" placeholder="Message TAIA..." onkeydown="handleKeydown(event)" disabled rows="1"></textarea>
+                        <button class="input-action-btn" type="button" title="Voice input">
+                            <i class="fas fa-microphone"></i>
+                        </button>
                         <button class="btn-send" onclick="sendMessage()" id="sendBtn" disabled>
-                            <i class="fas fa-paper-plane"></i>
+                            <i class="fas fa-arrow-up"></i>
                         </button>
                     </div>
                     <div class="input-footer">
@@ -133,12 +159,23 @@
         </main>
     </div>
     <script>
+        if (!localStorage.getItem('theme')) {
+            localStorage.setItem('theme', 'dark');
+        }
         window.TAIA_CONFIG = {
             AI_API_URL: {{ taia_ai_url | tojson }},
             ERP_API_URL: {{ taia_erp_url | tojson }}
         };
+
+        function fillPrompt(text) {
+            const input = document.getElementById('msgInput');
+            if (!input) return;
+            input.value = text;
+            input.focus();
+            input.dispatchEvent(new Event('input'));
+        }
     </script>
-    <script src="{{ url_for('static', filename='app.js') }}?v=10"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=11"></script>
     <div id="widget-root"></div>
     <script type="module" src="{{ url_for('static', filename='widget.js') }}"></script>
 </body>

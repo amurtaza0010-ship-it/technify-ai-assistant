@@ -22,6 +22,8 @@ from app.prompts.templates import ATTENDANCE_PROMPT, RESULTS_PROMPT, COURSE_PROM
 from app.services.llm import (
     LLM_CONNECTION_ERROR,
     TAIA_IDENTITY_SYSTEM,
+    TAIA_FACULTY_SYSTEM,
+    TAIA_ADMIN_SYSTEM,
     _estimate_tokens,
     ainvoke_llm_with_fallback,
     astream_llm_with_fallback,
@@ -72,11 +74,146 @@ Question: {question}
 
 Response:"""
 
+ADMIN_AT_RISK_PROMPT = """University at-risk student data is provided below.
+The list of students lives inside "summary" → "at_risk_students".
+
+Data:
+{admin_data}
+
+Question: {question}
+
+Instructions:
+- State the total count from "summary.total_at_risk", then list every student as a \
+numbered entry: name, course, reason (write "Reason not specified" if blank), \
+attendance% and GPA where present.
+- Never say "no information" or "no data" when student records are present.
+
+Response:"""
+
+ADMIN_FINANCE_PENDING_PROMPT = """Pending fee records are provided below.
+The list lives inside "summary" → "pending_fees".
+
+Data:
+{admin_data}
+
+Question: {question}
+
+Instructions:
+- State the total from "summary.total_pending", then list every entry as a numbered row: \
+student name, amount due, due date.
+- Never say "no information" or "no data" when records are present.
+
+Response:"""
+
 FACULTY_PROMPT = """Based on the following faculty data, answer the question clearly and accurately.
 Faculty Data:
 {faculty_data}
 
 Question: {question}
+
+Response:"""
+
+FACULTY_TEACHING_PROMPT = """The following JSON lists the courses taught by this faculty member.
+Look inside "courses" for the list (each entry has course_id, course_name, instructor).
+
+Faculty Data:
+{faculty_data}
+
+Question: {question}
+
+Instructions:
+- Answer directly, e.g. "You teach the following course(s): <course_id> <course_name>, ...".
+- List every course in the "courses" array — do not omit any.
+- If "courses" is empty, say "You are not currently assigned to teach any courses."
+- Never say "you can only access data related to your courses and students" — that phrase \
+does not apply to this question.
+
+Response:"""
+
+ASSIGNMENTS_PROMPT = """Based on the following assignment data for student {student_id}, \
+answer their question clearly.
+
+Assignment Data:
+{course_data}
+
+Question: {question}
+
+Instructions:
+- List every assignment in the data as a numbered entry: course, assignment name, status, \
+due date (if present).
+- If the question asks about "pending" assignments, only mention entries with status \
+"Pending". If none are present in the data, say "You have no pending assignments."
+- Never invent assignments that are not present in the data.
+
+Response:"""
+
+STUDENT_INSTRUCTORS_PROMPT = """Based on the following enrolled-course and instructor data for student \
+{student_id}, answer their question clearly.
+
+Instructor Data:
+{instructor_data}
+
+Question: {question}
+
+Instructions:
+- The "courses" list is the student's complete enrolled course list — the same data shown for \
+"Show my registered courses". Only use courses from this list.
+- When asked "who teaches me?" (or similar), list every course with its instructor as a \
+numbered entry: course name, instructor name.
+- When asked about a specific course (e.g. "who teaches me English?"), match the requested name \
+case-insensitively with partial match (e.g. "English" matches "English I"). If found, give the \
+instructor. If not found in this list, say "You are not enrolled in a course called <name>."
+- Never list courses or instructors that are not in the provided data.
+
+Response:"""
+
+FACULTY_AT_RISK_PROMPT = """The following JSON contains at-risk student data for a faculty member.
+Look inside "summary" → "top_at_risk_students" for the list of students.
+
+Faculty Data:
+{faculty_data}
+
+Question: {question}
+
+Instructions:
+- List EVERY student in "top_at_risk_students" as a numbered entry: name, course, reason \
+(or "Reason not specified" if blank), GPA / avg% if present.
+- State the total from "summary.total_at_risk" at the top.
+- Never say "there is no information" when student records are present.
+- End with a one-line total count.
+
+Response:"""
+
+FACULTY_ATTENDANCE_PROMPT = """The following JSON contains low-attendance data for a faculty member.
+Look inside "summary" → "top_low_attendance_students" for the list of students.
+
+Faculty Data:
+{faculty_data}
+
+Question: {question}
+
+Instructions:
+- List EVERY student in "top_low_attendance_students" as a numbered entry: name, course, \
+attendance% (required), and "Low attendance" as the reason.
+- If that list is empty but "global_fallback" exists, list those students instead.
+- Never say "there is no information" when student records are present.
+- End with a one-line total count.
+
+Response:"""
+
+FACULTY_UNGRADED_PROMPT = """The following JSON contains ungraded-assignment data for a faculty member.
+Look inside "summary" → "top_ungraded_assignments" for the list.
+
+Faculty Data:
+{faculty_data}
+
+Question: {question}
+
+Instructions:
+- List EVERY entry in "top_ungraded_assignments" as a numbered item: student name, \
+assignment name, course, due date (if present), status.
+- Never say "there is no information" when assignment records are present.
+- End with total_ungraded count.
 
 Response:"""
 
@@ -209,6 +346,19 @@ EXAM_OFFICER_INTENTS = [
 
 PROFILE_INTENTS = frozenset({'profile', 'name'})
 
+# Faculty analytical intents that pull large ERP datasets (10 courses x many students).
+# These use a condensed system prompt (TAIA_FACULTY_SYSTEM) to save tokens; every other
+# intent (student, admin, etc.) keeps the full TAIA_IDENTITY_SYSTEM persona unchanged.
+FACULTY_SHORT_SYSTEM_INTENTS = frozenset({
+    'faculty_attendance', 'faculty_at_risk', 'faculty_ungraded', 'faculty_performance',
+})
+
+# Admin analytical intents that embed a student/fee list in the human message.
+# Use TAIA_ADMIN_SYSTEM instead of the full TAIA_IDENTITY_SYSTEM to stay under TPM.
+ADMIN_SHORT_SYSTEM_INTENTS = frozenset({
+    'admin_at_risk', 'admin_finance_pending',
+})
+
 _AI_FULL_INTRO_PATTERNS = (
     r"who are you",
     r"what are you",
@@ -309,6 +459,19 @@ _KEYWORD_INTENT_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
         r"\bmy exams?\b",
         r"next exam",
     )),
+    # ── FACULTY ATTENDANCE (must come before generic attendance) ──
+    ("faculty_attendance", (
+        r"attendance of my courses",
+        r"attendance in CRS-\d+",
+        r"attendance for CRS-\d+",
+        r"course attendance",
+        r"faculty attendance",
+        r"my course attendance",
+        r"attendance for my courses",
+        r"how is the attendance",
+        r"what is the attendance",
+        r"show attendance",
+    )),
     ("attendance", (r"\battendance\b", r"\bpresent\b", r"\babsent\b", r"how many classes")),
     ("gpa", (r"\bgpa\b", r"\bcgpa\b", r"grade point")),
     ("admin_finance_pending", (r"pending fees?", r"unpaid fees?", r"students with pending fees?")),
@@ -333,8 +496,24 @@ _KEYWORD_INTENT_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
         r"due date",
     )),
     ("timetable", (r"\btimetable\b", r"class schedule", r"\bschedule\b.*\bclass")),
-    ("assignments", (r"\bmy assignments?\b", r"\bhomework\b", r"due this week")),
-    ("courses", (r"\bmy courses?\b", r"registered subjects", r"\benrolled\b")),
+    ("assignments", (
+        r"\bmy assignments?\b",
+        r"\bhomework\b",
+        r"due this week",
+        r"\b(what|show|list|my|pending)\s*(my\s*)?(pending\s*)?assignments\b",
+        r"\bassignments\s+(are\s+)?pending\b",
+        r"\bwhat\s+assignments\s+do\s+i\s+have\b",
+        r"\bpending\s+(assignments|work)\b",
+    )),
+    ("courses", (
+        r"\bmy courses?\b",
+        r"registered subjects?",
+        r"\benrolled\b",
+        r"\bmy subjects?\b",
+        r"what (are|were) (my|the) (subjects?|courses?)",
+        r"what (am i|i am) (taking|studying|enrolled in)",
+        r"which (subjects?|courses?) (am i|do i|i)",
+    )),
     ("results", (r"\bgrades?\b", r"\bmarks?\b", r"\bresults?\b", r"transcript")),
     ("study_plan", (r"study plan", r"study schedule", r"how (should|do) i study")),
     ("admin_overall", (r"overall (university )?statistics", r"total enrollment", r"university stats")),
@@ -349,6 +528,11 @@ def _keyword_intent(message: str, role: str) -> Optional[str]:
         if any(re.search(p, lower) for p in patterns):
             if role_norm == "student" and intent.startswith(("faculty_", "admin_")):
                 continue
+            # "courses" is the student's own-enrollment intent; a faculty member's
+            # course/subject question must go through faculty_teaching instead, or
+            # this would trigger the FACULTY_RESTRICTED_INTENTS access-denied path.
+            if role_norm == "faculty" and intent == "courses":
+                continue
             if role_norm == "faculty" and intent.startswith("admin_"):
                 continue
             return intent
@@ -358,17 +542,19 @@ def _keyword_intent(message: str, role: str) -> Optional[str]:
     return None
 
 
+_FACULTY_TEACHING_PATTERNS = (
+    r"\b(which|what)\s+(subjects?|courses?)\s+(do\s+)?i\s+teach\b",
+    r"\bmy teaching subjects?\b",
+    r"\bwhat do i teach\b",
+)
+
+
 def _heuristic_intent(message: str, role: str = "Student") -> Optional[str]:
     """Fast path for identity, greeting, policy, and RBAC-sensitive queries."""
     lower = message.lower().strip()
     role_norm = normalize_role(role)
     if role_norm == "faculty" and any(
-        phrase in lower
-        for phrase in (
-            "which subjects do i teach",
-            "my teaching subjects",
-            "what do i teach",
-        )
+        re.search(p, lower) for p in _FACULTY_TEACHING_PATTERNS
     ):
         return "faculty_teaching"
     if role_norm == "student" and any(
@@ -416,6 +602,9 @@ def _heuristic_intent(message: str, role: str = "Student") -> Optional[str]:
             return "faculty_missed_midterm"
         if "average grade for the" in lower and "course" in lower:
             return "faculty_course_average_grade"
+        # Catch-all for any faculty attendance query not captured by keyword patterns
+        if "attendance" in lower:
+            return "faculty_attendance"
     if role_norm == "student":
         if any(
             phrase in lower
@@ -461,6 +650,19 @@ def _heuristic_intent(message: str, role: str = "Student") -> Optional[str]:
     if _is_ai_identity_question(lower):
         return "ai_identity"
     if role_norm == "student" and "registered courses" in lower:
+        return "courses"
+    if role_norm == "student" and any(
+        phrase in lower
+        for phrase in (
+            "my subjects",
+            "what subjects",
+            "which subjects",
+            "what am i studying",
+            "what i am studying",
+            "what courses am i",
+            "which courses am i",
+        )
+    ):
         return "courses"
     return None
 
@@ -533,9 +735,22 @@ except Exception as e:
 def _build_system_message(
     session_id: Optional[str] = None,
     user_context: Optional[dict] = None,
+    intent: Optional[str] = None,
 ) -> str:
-    """Return TAIA identity system prompt. JWT user data is never injected here."""
-    prompt = TAIA_IDENTITY_SYSTEM
+    """Return TAIA identity system prompt. JWT user data is never injected here.
+
+    Faculty analytical intents (see FACULTY_SHORT_SYSTEM_INTENTS) use a condensed
+    persona (TAIA_FACULTY_SYSTEM) to reduce prompt token size, since those requests
+    already embed a large ERP data summary in the human message. All other intents
+    are unaffected and keep the full TAIA_IDENTITY_SYSTEM text.
+    """
+    use_short_prompt = intent in FACULTY_SHORT_SYSTEM_INTENTS
+    if intent in FACULTY_SHORT_SYSTEM_INTENTS:
+        prompt = TAIA_FACULTY_SYSTEM
+    elif intent in ADMIN_SHORT_SYSTEM_INTENTS:
+        prompt = TAIA_ADMIN_SYSTEM
+    else:
+        prompt = TAIA_IDENTITY_SYSTEM
     if user_context:
         role = user_context.get("role", "")
         uid = user_context.get("user_id", "")
@@ -653,27 +868,29 @@ def _has_prior_turns(session_id: str) -> bool:
 # ── Step 2: Helper — get history for a session ────────────────────────────────
 
 
-def _get_history(session_id: str, user_context: Optional[dict] = None):
+def _get_history(session_id: str, user_context: Optional[dict] = None, intent: Optional[str] = None):
     """
     Return (list_of_messages, redis_history_object_or_None) for a session.
 
     - If Redis is available: loads full conversation history from Redis.
     - If not: uses the in-memory dict as fallback.
     Always prepends the System Persona message so the LLM stays in character.
+    `intent` is only used to pick a condensed system prompt for faculty analytical
+    intents (see FACULTY_SHORT_SYSTEM_INTENTS); defaults to the full persona.
     """
     if _use_redis:
         history = RedisChatMessageHistory(
             session_id=f"taia:{session_id}",
             url=_get_redis_url(),
         )
-        msgs = [SystemMessage(content=_build_system_message(session_id, user_context))]
+        msgs = [SystemMessage(content=_build_system_message(session_id, user_context, intent))]
         msgs.extend(history.messages)
         return msgs, history
 
     if session_id not in _memories:
-        _memories[session_id] = [SystemMessage(content=_build_system_message(session_id, user_context))]
+        _memories[session_id] = [SystemMessage(content=_build_system_message(session_id, user_context, intent))]
     else:
-        _memories[session_id][0] = SystemMessage(content=_build_system_message(session_id, user_context))
+        _memories[session_id][0] = SystemMessage(content=_build_system_message(session_id, user_context, intent))
     return _memories[session_id], None
 
 
@@ -736,15 +953,17 @@ async def generate_chat_response(
     user_message: str,
     user_context: Optional[dict] = None,
     history_user_message: Optional[str] = None,
+    intent: Optional[str] = None,
 ) -> str:
     """
     Send user_message to the LLM with full conversation history.
     Saves the exchange to Redis (or in-memory fallback) afterwards.
+    `intent` only affects which system prompt is selected (see FACULTY_SHORT_SYSTEM_INTENTS).
     """
     t0 = time.perf_counter()
     display_message = history_user_message or user_message
     try:
-        messages, redis_history = _get_history(session_id, user_context)
+        messages, redis_history = _get_history(session_id, user_context, intent)
         messages.append(HumanMessage(content=user_message))
 
         response = await ainvoke_llm_with_fallback(messages)
@@ -795,10 +1014,13 @@ async def generate_chat_response_stream(
     user_message: str,
     user_context: Optional[dict] = None,
     history_user_message: Optional[str] = None,
+    intent: Optional[str] = None,
 ) -> AsyncIterator[str]:
-    """Stream user_message to the LLM with full conversation history."""
+    """Stream user_message to the LLM with full conversation history.
+    `intent` only affects which system prompt is selected (see FACULTY_SHORT_SYSTEM_INTENTS).
+    """
     display_message = history_user_message or user_message
-    messages, redis_history = _get_history(session_id, user_context)
+    messages, redis_history = _get_history(session_id, user_context, intent)
     messages.append(HumanMessage(content=user_message))
     async for chunk in _stream_and_save(
         session_id, display_message, messages, redis_history
@@ -1068,11 +1290,29 @@ async def _generate_contextual_response_inner(
             len(str(data)) if data is not None else 0,
         )
         prompt = ADMIN_PROMPT.format(admin_data=data, question=msg)
-    elif intent in ('courses', 'timetable', 'assignments'):
+    elif intent == 'admin_at_risk':
+        prompt = ADMIN_AT_RISK_PROMPT.format(admin_data=data, question=msg)
+    elif intent == 'admin_finance_pending':
+        prompt = ADMIN_FINANCE_PENDING_PROMPT.format(admin_data=data, question=msg)
+    elif intent == 'assignments':
+        prompt = ASSIGNMENTS_PROMPT.format(
+            student_id=sid, course_data=data, question=msg)
+    elif intent == 'student_instructors':
+        prompt = STUDENT_INSTRUCTORS_PROMPT.format(
+            student_id=sid, instructor_data=data, question=msg)
+    elif intent in ('courses', 'timetable'):
         prompt = COURSE_PROMPT.format(
             student_id=sid, course_data=data, question=msg)
     elif intent.startswith('admin_') or intent == 'department_stats':
         prompt = ADMIN_PROMPT.format(admin_data=data, question=msg)
+    elif intent == 'faculty_at_risk':
+        prompt = FACULTY_AT_RISK_PROMPT.format(faculty_data=data, question=msg)
+    elif intent == 'faculty_attendance':
+        prompt = FACULTY_ATTENDANCE_PROMPT.format(faculty_data=data, question=msg)
+    elif intent == 'faculty_ungraded':
+        prompt = FACULTY_UNGRADED_PROMPT.format(faculty_data=data, question=msg)
+    elif intent == 'faculty_teaching':
+        prompt = FACULTY_TEACHING_PROMPT.format(faculty_data=data, question=msg)
     elif intent.startswith('faculty_') or intent in ('at_risk_students', 'peers_gpa'):
         prompt = FACULTY_PROMPT.format(faculty_data=data, question=msg)
     else:
@@ -1081,7 +1321,7 @@ async def _generate_contextual_response_inner(
     # Pass user_context so student-scoped system prompt is applied
     ctx_for_history = user_context
     return await generate_chat_response(
-        sid, prompt, user_context=ctx_for_history, history_user_message=msg,
+        sid, prompt, user_context=ctx_for_history, history_user_message=msg, intent=intent,
     )
 
 
@@ -1203,18 +1443,32 @@ async def generate_contextual_response_stream(
             len(str(data)) if data is not None else 0,
         )
         prompt = ADMIN_PROMPT.format(admin_data=data, question=msg)
-    elif intent in ("courses", "timetable", "assignments"):
+    elif intent == "admin_at_risk":
+        prompt = ADMIN_AT_RISK_PROMPT.format(admin_data=data, question=msg)
+    elif intent == "admin_finance_pending":
+        prompt = ADMIN_FINANCE_PENDING_PROMPT.format(admin_data=data, question=msg)
+    elif intent == "assignments":
+        prompt = ASSIGNMENTS_PROMPT.format(
+            student_id=sid, course_data=data, question=msg
+        )
+    elif intent == "student_instructors":
+        prompt = STUDENT_INSTRUCTORS_PROMPT.format(
+            student_id=sid, instructor_data=data, question=msg
+        )
+    elif intent in ("courses", "timetable"):
         prompt = COURSE_PROMPT.format(
             student_id=sid, course_data=data, question=msg
         )
     elif intent.startswith("admin_") or intent == "department_stats":
         prompt = ADMIN_PROMPT.format(admin_data=data, question=msg)
     elif intent == "faculty_at_risk":
-        prompt = FACULTY_PROMPT.format(faculty_data=data, question=msg) + (
-            "\n\nSystem instruction: List all students in the top_at_risk_students "
-            "array whose reason mentions 'Low attendance'. Use their names and "
-            "course names. If the list is empty, say so clearly."
-        )
+        prompt = FACULTY_AT_RISK_PROMPT.format(faculty_data=data, question=msg)
+    elif intent == "faculty_attendance":
+        prompt = FACULTY_ATTENDANCE_PROMPT.format(faculty_data=data, question=msg)
+    elif intent == "faculty_ungraded":
+        prompt = FACULTY_UNGRADED_PROMPT.format(faculty_data=data, question=msg)
+    elif intent == "faculty_teaching":
+        prompt = FACULTY_TEACHING_PROMPT.format(faculty_data=data, question=msg)
     elif intent.startswith("faculty_") or intent in (
         "at_risk_students",
         "peers_gpa",
@@ -1233,7 +1487,7 @@ async def generate_contextual_response_stream(
 
     ctx_for_history = user_context
     async for chunk in generate_chat_response_stream(
-        sid, prompt, user_context=ctx_for_history, history_user_message=msg
+        sid, prompt, user_context=ctx_for_history, history_user_message=msg, intent=intent
     ):
         yield chunk
     logger.info(

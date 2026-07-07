@@ -14,15 +14,19 @@ load_dotenv()
 import json
 import logging
 import os
+import re
 import time
+import traceback
 
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
+logger = logging.getLogger("taia.main")
+
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, Request, HTTPException, Query
+from fastapi import FastAPI, Depends, Request, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -45,6 +49,8 @@ async def lifespan(app: FastAPI):
     print(f"Docs available at: http://localhost:{os.getenv('APP_PORT', 8000)}/docs")
     check_llm_api_key()
     warmup_knowledge_base()
+    from app.services.rag_service import warmup_admin_rag
+    warmup_admin_rag()
     print("=" * 50)
     yield
 
@@ -429,6 +435,321 @@ async def audit_logs(limit: int = 50):
 async def usage_stats():
     """Return overall usage statistics."""
     return get_audit_stats()
+
+
+# ========== Admin RAG (hybrid search over uploaded ERP data) ==========
+
+from app.services.rag_service import (
+    ingest_documents,
+    hybrid_retrieve,
+    get_rag_index_status,
+    MAX_UPLOAD_BYTES,
+)
+from app.services.llm import build_rag_prompt, astream_llm_with_fallback
+from langchain_core.messages import HumanMessage
+from app.chains import chatbot_chain
+
+
+# ── Abbreviation expansion (simple replace, no named groups) ──
+_ABBREVIATION_PATTERNS = [
+    (re.compile(r'\bvc\b', re.IGNORECASE), 'vice chancellor'),
+    (re.compile(r'\bdc\b', re.IGNORECASE), 'deputy commissioner'),
+    (re.compile(r'\bprofs?\b', re.IGNORECASE), 'professor'),
+    (re.compile(r'\bdept\b', re.IGNORECASE), 'department'),
+    (re.compile(r'\buni\b', re.IGNORECASE), 'university'),
+]
+
+def _expand_abbreviations(query: str) -> str:
+    for pattern, replacement in _ABBREVIATION_PATTERNS:
+        query = pattern.sub(replacement, query)
+    return query
+
+
+# ── Misspelling correction ──
+_MISSPELLING_PATTERNS = [
+    (re.compile(r'\bunivesity\b', re.IGNORECASE), 'university'),
+    (re.compile(r'\buniversty\b', re.IGNORECASE), 'university'),
+    (re.compile(r'\bv\.c\b', re.IGNORECASE), 'vice chancellor'),
+]
+
+def _correct_spelling(query: str) -> str:
+    for pattern, replacement in _MISSPELLING_PATTERNS:
+        query = pattern.sub(replacement, query)
+    return query
+
+
+_IDENTITY_QUERY_RE = re.compile(
+    r"\b(who\s+is|who'?s|who\s+(?:are|was|were)|tell\s+me\s+about|what\s+is\s+the\s+name\s+of)\b",
+    re.IGNORECASE,
+)
+_NAME_PATTERN_RE = re.compile(
+    r"\b(?:Prof\.\s*Dr\.|Prof\.|Dr\.|Mr\.|Mrs\.|Ms\.)\s+[A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b"
+)
+
+_IDENTITY_FILLER_PREFIXES = (
+    "tell me about ",
+    "what do you know about ",
+    "information about ",
+    "info about ",
+    "describe ",
+    "explain ",
+)
+
+
+def _canonicalize_identity_query(query: str) -> str:
+    """Convert identity-seeking questions to a simple 'who is ...' form."""
+    lower = query.lower().strip()
+    for prefix in _IDENTITY_FILLER_PREFIXES:
+        if lower.startswith(prefix):
+            core = query[len(prefix):].strip()
+            return f"who is {core}"
+    return query
+
+
+def _boost_identity_chunks(query: str, chunks: list) -> list:
+    """
+    If the query asks for a person's identity, move chunks that contain
+    a person's name to the front, preserving others in order.
+    """
+    if not _IDENTITY_QUERY_RE.search(query):
+        return chunks
+    named = [c for c in chunks if _NAME_PATTERN_RE.search(c.page_content)]
+    others = [c for c in chunks if not _NAME_PATTERN_RE.search(c.page_content)]
+    return named + others
+
+
+def _rag_history_session(request_session: str, uid: str) -> str:
+    """Use a stable per-admin key when clients send ephemeral x-session-id values."""
+    if request_session and request_session != uid:
+        if not re.fullmatch(r"admin_rag_\d{10,}", request_session):
+            return request_session
+    return f"admin_rag_{uid}"
+
+
+_SHORT_QUERY_MAX_WORDS = 15
+
+_QUERY_FILLER_PREFIXES = (
+    "can you tell me about",
+    "could you tell me about",
+    "tell me more about",
+    "tell me about",
+    "what do you know about",
+    "what can you tell me about",
+    "give me information about",
+    "give me info about",
+    "information about",
+    "info about",
+    "who is the",
+    "who is",
+    "what is the",
+    "what is",
+)
+
+_CONTEXT_SENTENCE_RE = re.compile(
+    r"(?:"
+    r"\(Page\s+\d+\)|"
+    r"\b(?:Prof\.|Dr\.|Mr\.|Mrs\.|Ms\.|University|College|Institute)\b|"
+    r"\b[A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|Prof\.|Dr\.))+|"
+    r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b"
+    r")"
+)
+
+_RAG_REFERENCE_INSTRUCTION = (
+    "\n\nIf the user asks for a reference, reply ONLY with the page number and the "
+    'exact sentence from the excerpt. Example: "Page 9: Prof. Dr. Tauha Hussain Ali '
+    'is the Vice-Chancellor."'
+)
+
+
+def _extract_relevant_context_sentence(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return ""
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    # First pass: look for a sentence with a name and a page citation (ideal anchor)
+    for sentence in sentences:
+        candidate = sentence.strip()
+        if candidate and _NAME_PATTERN_RE.search(candidate) and "Page" in candidate:
+            return candidate
+
+    # Second pass: fall back to any sentence with a page citation
+    for sentence in sentences:
+        candidate = sentence.strip()
+        if candidate and "Page" in candidate:
+            return candidate
+
+    # Final fallback: first sentence
+    return sentences[0].strip() if sentences else text
+
+
+def _enhance_short_query(query: str) -> str:
+    """Expand vague short queries so retrieval can find the right entity chunks."""
+    stripped = query.strip()
+    if not stripped:
+        return query
+
+    words = stripped.split()
+    if len(words) >= _SHORT_QUERY_MAX_WORDS:
+        return query
+
+    lowered = stripped.lower().rstrip("?.! ")
+    if len(words) >= 8 and any(
+        lowered.startswith(prefix) for prefix in ("who is", "what is", "where is", "which")
+    ):
+        return query
+
+    core = lowered
+    for prefix in sorted(_QUERY_FILLER_PREFIXES, key=len, reverse=True):
+        if core.startswith(prefix):
+            core = core[len(prefix):].strip()
+            break
+
+    core = core.strip("?.! ")
+    if not core:
+        return query
+
+    return f"{core} name profile details"
+
+
+def _build_rag_retrieval_query(user_msg: str, history_session: str) -> str:
+    """Combine recent assistant context with the current user message for retrieval."""
+    try:
+        history = get_session_messages(history_session)
+        if history:
+            last_ai = next(
+                (message for message in reversed(history[-6:]) if message.get("role") == "assistant"),
+                None,
+            )
+            if last_ai:
+                last_ai_content = (last_ai.get("content") or "").strip()
+                if last_ai_content:
+                    context_sentence = _extract_relevant_context_sentence(last_ai_content)
+                    if context_sentence:
+                        retrieval_query = f"Context: {context_sentence}. Query: {user_msg}"
+                        logger.info("RAG retrieval query: %s", retrieval_query[:200])
+                        return retrieval_query
+    except Exception as exc:
+        logger.warning("RAG retrieval context unavailable: %s", exc)
+    logger.info("RAG retrieval query (no history): %s", user_msg[:200])
+    return user_msg
+
+
+def _save_rag_exchange(history_session: str, user_msg: str, ai_msg: str) -> None:
+    """Persist admin RAG turns so follow-up retrieval can use conversation context."""
+    if not ai_msg.strip():
+        return
+    try:
+        _, redis_history = chatbot_chain._get_history(history_session)
+        chatbot_chain._save_to_history(history_session, user_msg, ai_msg, redis_history)
+    except Exception as exc:
+        logger.warning("Failed to save admin RAG history: %s", exc)
+
+
+@app.get('/api/v1/admin/rag/status', tags=['Admin RAG'])
+async def admin_rag_status(user_data: dict = Depends(allow_only_admin)):
+    """Return admin RAG index status (document count, readiness)."""
+    return get_rag_index_status()
+
+
+@app.post('/api/v1/admin/rag/upload', tags=['Admin RAG'])
+async def admin_rag_upload(
+    file: UploadFile = File(...),
+    user_data: dict = Depends(allow_only_admin),
+):
+    """Upload CSV/Excel/JSON ERP data and index for hybrid RAG (admin only)."""
+    filename = file.filename or "upload.csv"
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if ext not in ("csv", "xlsx", "xls", "json", "pdf", "docx"):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Upload .csv, .xlsx, .json, .pdf, or .docx",
+        )
+
+    try:
+        logger.info(f"RAG upload requested: filename={file.filename}, size={file.size}")
+        contents = await file.read()
+        if len(contents) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
+            )
+        if not contents:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+        result = ingest_documents(contents, filename)
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"RAG upload failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post('/api/v1/chat/rag', tags=['Admin RAG'])
+async def chat_rag(
+    request: Request,
+    message: dict,
+    user_data: dict = Depends(allow_only_admin),
+):
+    """
+    Admin-only RAG chat over uploaded ERP data (hybrid BM25 + vector retrieval).
+    Does not affect normal mock-ERP chat flows.
+    """
+    timer = RequestTimer("chat-rag")
+    user_msg = (message.get("message") or "").strip()
+    if not user_msg:
+        return {"response": "Please provide a message.", "intent": "admin_rag"}
+
+    # ── Expand abbreviations so "vc" → "vice chancellor" ──
+    user_msg = _expand_abbreviations(user_msg)
+    user_msg = _correct_spelling(user_msg)
+    # Normalise "who X" → "who is X" so identity patterns catch them
+    if re.match(r"who\s+(?!is\b|are\b|was\b|were\b)", user_msg, re.IGNORECASE):
+        user_msg = re.sub(r"who\b", "who is", user_msg, count=1, flags=re.IGNORECASE)
+    if _IDENTITY_QUERY_RE.search(user_msg):
+        user_msg = _canonicalize_identity_query(user_msg)
+
+    uid = user_data.get("user_id", "ADM-0001")
+    session = request.headers.get("x-session-id") or message.get("session_id") or uid
+    history_session = _rag_history_session(session, uid)
+    start = time.time()
+
+    retrieval_query = _build_rag_retrieval_query(user_msg, history_session)
+    if not retrieval_query.startswith("Context:") and not _IDENTITY_QUERY_RE.search(user_msg):
+        retrieval_query = _enhance_short_query(retrieval_query)
+    chunks = hybrid_retrieve(retrieval_query, top_k=7)
+    chunks = _boost_identity_chunks(user_msg, chunks)
+    timer.mark(f"Hybrid RAG retrieve ({len(chunks)} chunks)")
+
+    prompt = build_rag_prompt(user_msg, chunks) + _RAG_REFERENCE_INSTRUCTION
+    messages = [HumanMessage(content=prompt)]
+
+    async def generate():
+        full_text = ""
+        yield f"data: {json.dumps({'meta': {'intent': 'admin_rag', 'chunks': len(chunks)}})}\n\n"
+        async for chunk in astream_llm_with_fallback(messages):
+            if chunk:
+                full_text += chunk
+                yield f"data: {json.dumps({'text': chunk})}\n\n"
+        elapsed = round(time.time() - start, 2)
+        log_request(uid, "admin", user_msg, "admin_rag", elapsed)
+        _save_rag_exchange(history_session, user_msg, full_text)
+        perf = timer.finish()
+        yield f"data: {json.dumps({'meta': {'intent': 'admin_rag', 'time': f'{elapsed}s', 'perf': perf}})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
 
 if __name__ == "__main__":
     import uvicorn

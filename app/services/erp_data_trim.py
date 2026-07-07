@@ -14,9 +14,23 @@ FACULTY_COMPRESS_INTENTS = frozenset({
     "faculty_performance",
 })
 
-TOP_STUDENTS = 20
-TOP_ASSIGNMENTS = 20
-TOP_COURSE_LOW = 10
+ADMIN_COMPRESS_INTENTS = frozenset({
+    "admin_at_risk",
+    "admin_finance_pending",
+})
+
+STUDENT_COMPRESS_INTENTS = frozenset({
+    "results",
+    "timetable",
+    "assignments",
+    "student_grade_calculation",
+    "student_instructors",
+})
+
+TOP_STUDENTS = 8
+TOP_ASSIGNMENTS = 8
+TOP_COURSE_LOW = 5
+TOP_STUDENT_COURSES = 15
 
 _ANALYTICAL_MARKERS = (
     r"\bwhich students?\b",
@@ -34,7 +48,6 @@ _ANALYTICAL_MARKERS = (
     r"\bclass performance\b",
 )
 
-# Per-field list caps when trimming nested dict payloads (non-faculty / specific lookups)
 INTENT_LIST_LIMITS: dict[str, dict[str, int]] = {
     "faculty_performance": {"courses": 10},
     "faculty_attendance": {
@@ -47,11 +60,18 @@ INTENT_LIST_LIMITS: dict[str, dict[str, int]] = {
         "at_risk_students": 15,
     },
     "faculty_ungraded": {"by_course": 15, "ungraded_assignments": 15},
-    "assignments": {"assignments": 15, "upcoming": 15},
+    "assignments": {"assignments": 8, "assignments_due_this_week": 8, "upcoming": 8},
     "attendance": {"courses": 10, "records": 20},
-    "admin_at_risk": {"at_risk_students": 15},
-    "courses": {"courses": 15},
-    "results": {"results": 15, "exams": 15},
+    "admin_at_risk": {"at_risk_students": 8},
+    "admin_finance_pending": {"pending_fees": 8},
+    "courses": {"courses": 8},
+    "student_instructors": {"courses": 15},
+    "results": {"results": 10, "exams": 10},
+    "timetable": {"timetable": 15},
+    "faculty_courses": {"courses": 8},
+    "faculty_teaching": {"courses": 8, "subjects": 8},
+    "admin_departments": {"departments": 10},
+    "admin_finance_department": {"departments": 10},
 }
 
 DEFAULT_LIST_LIMIT = 10
@@ -128,6 +148,7 @@ def _filter_faculty_payload_by_name(data: dict, intent: str, name_hint: str) -> 
         "attendance_by_course", "at_risk_by_course", "students", "all_students",
     )}
     result["_student_lookup"] = name_hint
+    result["_compressed_for_llm"] = True
 
     if intent == "faculty_attendance":
         filtered_courses = []
@@ -190,12 +211,12 @@ def _filter_faculty_payload_by_name(data: dict, intent: str, name_hint: str) -> 
 
 
 def _compress_faculty_attendance(data: dict) -> dict:
+    """Summarize per-course attendance to only the top-N critical courses/students."""
     courses = data.get("attendance_by_course", [])
     course_summaries = []
     top_lowest = []
     total_students = 0
     total_below_75 = 0
-    compressed_courses = []
 
     for course in courses:
         if not isinstance(course, dict):
@@ -229,30 +250,24 @@ def _compress_faculty_attendance(data: dict) -> dict:
                 "course_id": course.get("course_id"),
                 "course_name": course.get("course_name"),
                 "attendance_percentage": _attendance_pct(student),
+                "reason": "Low attendance",
                 "warning_flag": student.get("warning_flag", _attendance_pct(student) < 75),
             })
 
-        compressed_courses.append({
-            "course_id": course.get("course_id"),
-            "course_name": course.get("course_name"),
-            "total_students": course_total,
-            "students_below_75": len(low_students),
-            "average_attendance": average_attendance,
-        })
-
     top_lowest.sort(key=lambda row: row["attendance_percentage"])
+    course_summaries.sort(key=lambda row: row.get("average_attendance") if row.get("average_attendance") is not None else 100)
 
     result = {
         "faculty_id": data.get("faculty_id"),
         "_compressed_for_llm": True,
         "summary": {
-            "total_courses": len(compressed_courses),
+            "total_courses": len(course_summaries),
             "total_students": total_students,
             "students_below_75_total": total_below_75,
-            "course_summaries": course_summaries,
-            "top_20_lowest_attendance": top_lowest[:TOP_STUDENTS],
+            "course_summaries": course_summaries[:TOP_COURSE_LOW],
+            "courses_shown": min(len(course_summaries), TOP_COURSE_LOW),
+            "top_low_attendance_students": top_lowest[:TOP_STUDENTS],
         },
-        "attendance_by_course": compressed_courses,
     }
 
     if "global_fallback" in data and isinstance(data["global_fallback"], dict):
@@ -266,9 +281,28 @@ def _compress_faculty_attendance(data: dict) -> dict:
     return result
 
 
+def _compact_at_risk_student(student: dict, course_id: str | None, course_name: str | None) -> dict:
+    """Return the minimal at-risk student record the LLM needs to answer questions."""
+    reason = (
+        student.get("reason", "")
+        or student.get("remarks", "")
+        or ""
+    )
+    return {
+        "student_id": student.get("student_id"),
+        "student_name": _student_name(student),
+        "course_id": course_id or student.get("course_id"),
+        "course_name": course_name or student.get("course_name", ""),
+        "reason": reason,
+        "attendance_percentage": student.get("attendance_percentage"),
+        "GPA": student.get("GPA") or student.get("gpa"),
+        "avg_percentage": student.get("avg_percentage", student.get("total")),
+        "current_grade": student.get("current_grade"),
+    }
+
+
 def _compress_faculty_at_risk(data: dict) -> dict:
     courses = data.get("at_risk_by_course", [])
-    grouped_by_course = []
     top_at_risk = []
     total_at_risk = 0
 
@@ -281,67 +315,45 @@ def _compress_faculty_at_risk(data: dict) -> dict:
             at_risk = [s for s in students if s.get("at_risk")]
 
         total_at_risk += len(at_risk)
-        grouped_by_course.append({
-            "course_id": course.get("course_id"),
-            "course_name": course.get("course_name"),
-            "total_students": course.get("total_students", len(students)),
-            "at_risk_count": len(at_risk),
-        })
 
         for student in at_risk:
             if not isinstance(student, dict):
                 continue
-            top_at_risk.append({
-                "student_id": student.get("student_id"),
-                "student_name": _student_name(student),
-                "course_id": course.get("course_id"),
-                "course_name": course.get("course_name"),
-                "GPA": student.get("GPA"),
-                "midterm": student.get("midterm"),
-                "final": student.get("final"),
-                "avg_percentage": student.get("avg_percentage", student.get("total")),
-                "current_grade": student.get("current_grade"),
-                "remarks": student.get("remarks"),
-            })
+            top_at_risk.append(
+                _compact_at_risk_student(student, course.get("course_id"), course.get("course_name"))
+            )
+
+    if not top_at_risk and data.get("top_at_risk_students"):
+        for stu in data["top_at_risk_students"]:
+            if isinstance(stu, dict):
+                top_at_risk.append(_compact_at_risk_student(stu, None, None))
+        total_at_risk = total_at_risk or data.get("total_at_risk", len(top_at_risk))
 
     top_at_risk.sort(
-        key=lambda row: row.get("avg_percentage") if row.get("avg_percentage") is not None else row.get("GPA", 0) or 0,
+        key=lambda row: (
+            row.get("avg_percentage")
+            if row.get("avg_percentage") is not None
+            else (row.get("GPA") or 0)
+        ),
     )
 
-    result = {
+    return {
         "faculty_id": data.get("faculty_id"),
         "_compressed_for_llm": True,
         "summary": {
             "total_at_risk": total_at_risk,
-            "grouped_by_course": grouped_by_course,
             "top_at_risk_students": top_at_risk[:TOP_STUDENTS],
         },
     }
 
-    if "global_fallback" in data and isinstance(data["global_fallback"], dict):
-        fallback = data["global_fallback"]
-        fallback_rows = fallback.get("at_risk_students", [])
-        result["global_fallback"] = {
-            "source": fallback.get("source"),
-            "total_at_risk": fallback.get("total_at_risk", len(fallback_rows)),
-            "at_risk_students": fallback_rows[:TOP_STUDENTS],
-        }
-    return result
-
 
 def _compact_assignment(row: dict) -> dict:
+    """Keep only the 5 fields the LLM actually needs; strip ERP-internal IDs."""
     return {
-        "assignment_id": row.get("assignment_id"),
         "assignment_name": row.get("assignment_name", row.get("assignment_title")),
         "course": row.get("course", row.get("course_name")),
-        "course_id": row.get("course_id"),
-        "student_id": row.get("student_id"),
         "student_name": row.get("student_name"),
         "due_date": row.get("due_date"),
-        "submitted": row.get("submitted"),
-        "graded": row.get("graded"),
-        "pending_grading": row.get("pending_grading"),
-        "missing_submission": row.get("missing_submission"),
         "status": row.get("status"),
     }
 
@@ -349,13 +361,6 @@ def _compact_assignment(row: dict) -> dict:
 def _compress_faculty_ungraded(data: dict) -> dict:
     ungraded = [row for row in data.get("ungraded_assignments", []) if isinstance(row, dict)]
     overdue = [row for row in data.get("overdue_assignments", []) if isinstance(row, dict)]
-    by_course = [
-        row for row in data.get("by_course", [])
-        if isinstance(row, dict)
-    ]
-    by_course.sort(key=lambda row: row.get("ungraded_count", 0), reverse=True)
-    dashboard = data.get("dashboard") if isinstance(data.get("dashboard"), dict) else {}
-
     overdue_sorted = sorted(overdue, key=lambda row: row.get("due_date") or "")
 
     return {
@@ -363,13 +368,8 @@ def _compress_faculty_ungraded(data: dict) -> dict:
         "summary": {
             "total_ungraded": data.get("total_ungraded", len(ungraded)),
             "total_overdue": data.get("total_overdue", len(overdue)),
-            "assignment_counts_by_course": by_course[:TOP_COURSE_LOW],
             "top_ungraded_assignments": [_compact_assignment(row) for row in ungraded[:TOP_ASSIGNMENTS]],
             "top_overdue_assignments": [_compact_assignment(row) for row in overdue_sorted[:TOP_ASSIGNMENTS]],
-            "pending_grading": dashboard.get("pending_grading"),
-            "upcoming_deadlines": dashboard.get("upcoming_deadlines"),
-            "recent_submissions": dashboard.get("recent_submissions"),
-            "course_summaries": (dashboard.get("course_summaries") or [])[:TOP_COURSE_LOW],
         },
     }
 
@@ -437,6 +437,149 @@ def _compress_faculty_performance(data: dict) -> dict:
     }
 
 
+# ── Admin compressors ──────────────────────────────────────────────────────────
+
+def _compress_admin_at_risk(data: dict) -> dict:
+    """Cap to TOP_STUDENTS, strip internal fields the LLM doesn't need."""
+    students = [s for s in data.get("at_risk_students", []) if isinstance(s, dict)]
+    compact = [
+        {
+            "student_id": s.get("student_id"),
+            "name": _student_name(s),                             # now uses both student_name/name
+            "course_name": s.get("course_name", ""),
+            "reason": s.get("reason", "") or s.get("remarks", ""),
+            "attendance_percentage": s.get("attendance_percentage") or s.get("attendance"),
+            "GPA": s.get("GPA") or s.get("gpa"),
+        }
+        for s in students[:TOP_STUDENTS]
+    ]
+    return {
+        "_compressed_for_llm": True,
+        "summary": {
+            "total_at_risk": len(students),
+            "at_risk_students": compact,
+        },
+    }
+
+
+def _compress_admin_finance_pending(data: dict) -> dict:
+    """Cap to TOP_STUDENTS, keep only essential payment fields."""
+    pending = [p for p in data.get("pending_fees", []) if isinstance(p, dict)]
+    compact = [
+        {
+            "student_id": p.get("student_id"),
+            "name": p.get("name", ""),
+            "amount": p.get("due_amount") or p.get("amount") or p.get("fee_amount"),
+            "due_date": p.get("due_date"),
+        }
+        for p in pending[:TOP_STUDENTS]
+    ]
+    return {
+        "_compressed_for_llm": True,
+        "summary": {
+            "total_pending": len(pending),
+            "pending_fees": compact,
+        },
+    }
+
+
+# ── Student compressors ────────────────────────────────────────────────────────
+
+def _compress_student_results(data: dict) -> dict:
+    """Strip per-record ERP noise (IDs, codes) and cap to 10 most recent exams."""
+    results = [r for r in data.get("results", []) if isinstance(r, dict)]
+    compact = [
+        {
+            "course_name": r.get("course_name", ""),
+            "exam_type": r.get("exam_type", ""),
+            "marks_obtained": r.get("marks_obtained"),
+            "total_marks": r.get("total_marks"),
+            "percentage": r.get("percentage"),
+            "grade": r.get("grade") or r.get("current_grade", ""),
+        }
+        for r in results[:10]
+    ]
+    return {
+        "_compressed_for_llm": True,
+        "student_id": data.get("student_id"),
+        "results": compact,
+        "total_exams": len(results),
+    }
+
+
+_TIMETABLE_KEEP = frozenset({"course", "code", "day", "days", "time", "time_slot", "room", "faculty"})
+
+
+def _compress_student_timetable(data: dict) -> dict:
+    """Keep only schedule-relevant timetable fields, cap to 15 entries."""
+    entries = [e for e in data.get("timetable", []) if isinstance(e, dict)]
+    compact = [
+        {k: v for k, v in e.items() if k in _TIMETABLE_KEEP}
+        for e in entries[:15]
+    ]
+    return {
+        "_compressed_for_llm": True,
+        "student_id": data.get("student_id"),
+        "timetable": compact,
+        "total_entries": len(entries),
+    }
+
+
+def _compress_student_assignments(data: dict, message: str | None = None) -> dict:
+    """Unify both assignment key variants; strip ERP-internal fields; cap to TOP_ASSIGNMENTS."""
+    raw = (
+        [a for a in data.get("assignments", []) if isinstance(a, dict)]
+        or [a for a in data.get("assignments_due_this_week", []) if isinstance(a, dict)]
+    )
+
+    if message and "pending" in message.lower():
+        pending_only = [a for a in raw if str(a.get("status", "")).strip().lower() == "pending"]
+        if pending_only:
+            raw = pending_only
+
+    compact = [
+        {
+            "course": a.get("course") or a.get("course_name", ""),
+            "assignment": (
+                a.get("assignment")
+                or a.get("assignment_title")
+                or a.get("title", "")
+            ),
+            "status": a.get("status", ""),
+            "due_date": a.get("due_date", ""),
+            "marks": a.get("marks") or a.get("marks_obtained"),
+        }
+        for a in raw[:TOP_ASSIGNMENTS]
+    ]
+    payload_key = "assignments_due_this_week" if data.get("assignments_due_this_week") else "assignments"
+    return {
+        "_compressed_for_llm": True,
+        "student_id": data.get("student_id"),
+        payload_key: compact,
+        "total": len(raw),
+    }
+
+
+def _compress_student_instructors(data: dict) -> dict:
+    """Keep instructor rows aligned with the courses intent list; cap at TOP_STUDENT_COURSES."""
+    courses = [c for c in data.get("courses", []) if isinstance(c, dict)]
+    compact = [
+        {
+            "course_id": c.get("course_id"),
+            "course_name": c.get("course_name", ""),
+            "instructor": c.get("instructor") or c.get("faculty_name", ""),
+        }
+        for c in courses[:TOP_STUDENT_COURSES]
+    ]
+    return {
+        "_compressed_for_llm": True,
+        "student_id": data.get("student_id"),
+        "courses": compact,
+        "total_courses": len(courses),
+        "courses_shown": len(compact),
+    }
+
+
 def _trim_list(key: str, items: list, intent: str | None) -> tuple[list, bool]:
     limits = INTENT_LIST_LIMITS.get(intent or "", {})
     cap = limits.get(key, DEFAULT_LIST_LIMIT)
@@ -498,14 +641,15 @@ def trim_erp_payload_for_llm(
     intent: str | None = None,
     message: str | None = None,
 ) -> Any:
-    """
-    Reduce ERP payloads before they are embedded in LLM prompts.
-    Faculty analytical intents are summarized; named student lookups are filtered, not summarized.
-    """
+    """Reduce ERP payloads before they are embedded in LLM prompts."""
     if not isinstance(data, dict):
         return _legacy_trim_erp_payload(data, intent)
 
+    if data.get("_compressed_for_llm"):
+        return data
+
     intent_key = (intent or "").lower().strip()
+
     if intent_key in FACULTY_COMPRESS_INTENTS and message:
         if _is_specific_student_lookup(message):
             name_hint = _extract_student_name_hint(message) or message
@@ -519,7 +663,23 @@ def trim_erp_payload_for_llm(
         }
         return compressors[intent_key](data)
 
-    if isinstance(data, dict) and data.get("_compressed_for_llm"):
-        return data
+    if intent_key in ADMIN_COMPRESS_INTENTS:
+        admin_compressors: dict[str, Callable[[dict], dict]] = {
+            "admin_at_risk": _compress_admin_at_risk,
+            "admin_finance_pending": _compress_admin_finance_pending,
+        }
+        return admin_compressors[intent_key](data)
+
+    if intent_key == "assignments":
+        return _compress_student_assignments(data, message)
+
+    if intent_key in STUDENT_COMPRESS_INTENTS:
+        student_compressors: dict[str, Callable[[dict], dict]] = {
+            "results": _compress_student_results,
+            "timetable": _compress_student_timetable,
+            "student_grade_calculation": _compress_student_results,
+            "student_instructors": _compress_student_instructors,
+        }
+        return student_compressors[intent_key](data)
 
     return _legacy_trim_erp_payload(data, intent)
