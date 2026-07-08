@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger("taia.main")
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, Request, HTTPException, Query, UploadFile, File
+from fastapi import FastAPI, Depends, Request, HTTPException, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -655,6 +655,7 @@ async def admin_rag_status(user_data: dict = Depends(allow_only_admin)):
 @app.post('/api/v1/admin/rag/upload', tags=['Admin RAG'])
 async def admin_rag_upload(
     file: UploadFile = File(...),
+    mode: str = Form("replace"),               # <-- new parameter
     user_data: dict = Depends(allow_only_admin),
 ):
     """Upload CSV/Excel/JSON ERP data and index for hybrid RAG (admin only)."""
@@ -667,7 +668,7 @@ async def admin_rag_upload(
         )
 
     try:
-        logger.info(f"RAG upload requested: filename={file.filename}, size={file.size}")
+        logger.info(f"RAG upload requested: filename={file.filename}, size={file.size}, mode={mode}")
         contents = await file.read()
         if len(contents) > MAX_UPLOAD_BYTES:
             raise HTTPException(
@@ -677,7 +678,7 @@ async def admin_rag_upload(
         if not contents:
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-        result = ingest_documents(contents, filename)
+        result = ingest_documents(contents, filename, mode=mode)   # <-- pass mode
         return result
     except HTTPException:
         raise

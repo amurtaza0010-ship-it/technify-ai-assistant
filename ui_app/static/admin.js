@@ -554,6 +554,11 @@ async function handleRagUpload(event) {
   const formData = new FormData();
   formData.append("file", file);
 
+  // ── Read checkbox state and append mode ──
+  const appendCheckbox = document.getElementById("ragAppendMode");
+  const mode = appendCheckbox?.checked ? "append" : "replace";
+  formData.append("mode", mode);
+
   try {
     const response = await fetch(`${FASTAPI_URL}/api/v1/admin/rag/upload`, {
       method: "POST",
@@ -565,7 +570,7 @@ async function handleRagUpload(event) {
       throw new Error(data.detail || "Upload failed");
     }
     setRagStatus(
-      `Success: ${data.documents_indexed} row(s) indexed (dense + BM25).`,
+      `Success: ${data.documents_indexed} document(s) indexed (total: ${data.total_documents || data.documents_indexed}).`,
       "success"
     );
     const toggle = document.getElementById("ragModeToggle");

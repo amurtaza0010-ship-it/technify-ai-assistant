@@ -1806,10 +1806,10 @@ body > #adminLoginPanel.dash-login {
 .audit-filter-group select {
     flex: 1;
     padding: 9px 0;
-    background: transparent;
+    background:transparent;
     border: none;
     outline: none;
-    color: #FFFFFF;
+    color: #6158b6;
     font-size: 12.5px;
     font-family: inherit;
 }
@@ -1907,7 +1907,29 @@ body > #adminLoginPanel.dash-login {
     border-radius: 999px;
     font-size: 11px;
     font-weight: 600;
-    color: white;
+    color: #fff !important;
+}
+
+.rag-append-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    flex-shrink: 0;
+    user-select: none;
+}
+
+.rag-append-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: var(--primary);
+    cursor: pointer;
+    flex-shrink: 0;
 }
 
 .rag-toggle input { display: none; }
@@ -2075,6 +2097,160 @@ body > #adminLoginPanel.dash-login {
 
 .filter-bar {
     border-bottom: none;
+}
+
+/* ── Admin dashboard light theme ── */
+[data-theme="light"] .dash-body,
+[data-theme="light"] .dash-app,
+[data-theme="light"] .dash-main {
+    background: var(--bg-main);
+}
+
+[data-theme="light"] body > #adminLoginPanel.dash-login {
+    background: var(--bg-main);
+}
+
+[data-theme="light"] .dash-sidebar {
+    background: var(--bg-sidebar);
+    border-right-color: var(--border-color);
+}
+
+[data-theme="light"] .dash-logo {
+    border-bottom-color: var(--border-color);
+}
+
+[data-theme="light"] .dash-divider,
+[data-theme="light"] .rag-divider {
+    background: var(--border-color);
+}
+
+[data-theme="light"] .dash-logo-title,
+[data-theme="light"] .dash-user-meta strong,
+[data-theme="light"] .dash-header-left h1,
+[data-theme="light"] .dash-card-header h3,
+[data-theme="light"] .kpi-value,
+[data-theme="light"] .audit-section-header h2,
+[data-theme="light"] .rag-title-row h2,
+[data-theme="light"] .dash-btn-ghost,
+[data-theme="light"] .dash-login-card h2,
+[data-theme="light"] .rag-toggle-label,
+[data-theme="light"] .rag-append-label {
+    color: var(--text-primary);
+}
+
+[data-theme="light"] .dash-logo-sub,
+[data-theme="light"] .dash-user-meta span,
+[data-theme="light"] .dash-nav-item,
+[data-theme="light"] .dash-sidebar-btn,
+[data-theme="light"] .dash-header-left p,
+[data-theme="light"] .kpi-label,
+[data-theme="light"] .kpi-sub,
+[data-theme="light"] .audit-section-header p,
+[data-theme="light"] .rag-enterprise-info p,
+[data-theme="light"] .rag-meta-item,
+[data-theme="light"] .rag-status,
+[data-theme="light"] .audit-pagination-info,
+[data-theme="light"] .dash-pill,
+[data-theme="light"] .field-label,
+[data-theme="light"] .dash-login-card p {
+    color: var(--text-secondary);
+}
+
+[data-theme="light"] .dash-nav-item:hover,
+[data-theme="light"] .dash-nav-item.active,
+[data-theme="light"] .dash-sidebar-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+[data-theme="light"] .dash-user-card,
+[data-theme="light"] .kpi-card,
+[data-theme="light"] .chart-main,
+[data-theme="light"] .rag-enterprise,
+[data-theme="light"] .table-container,
+[data-theme="light"] .audit-filters,
+[data-theme="light"] .dash-pill,
+[data-theme="light"] .dash-btn-ghost,
+[data-theme="light"] .dash-login-card,
+[data-theme="light"] .dash-menu-btn {
+    background: var(--bg-card);
+    border-color: var(--border-color);
+}
+
+[data-theme="light"] .kpi-card:hover,
+[data-theme="light"] .chart-main:hover {
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow);
+}
+
+[data-theme="light"] .dash-btn-ghost:hover,
+[data-theme="light"] .dash-menu-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-strong);
+}
+
+[data-theme="light"] .table-container th,
+[data-theme="light"] .table-container td,
+[data-theme="light"] .audit-table th,
+[data-theme="light"] .audit-table td {
+    color: var(--text-primary);
+    border-bottom-color: var(--border-color);
+}
+
+[data-theme="light"] .audit-table th,
+[data-theme="light"] .table-container th {
+    background: var(--bg-elevated) !important;
+    color: var(--text-muted) !important;
+}
+
+[data-theme="light"] .table-container .badge,
+[data-theme="light"] .audit-table .badge {
+    color: #fff !important;
+}
+
+[data-theme="light"] .table-container tbody tr:hover {
+    background: var(--bg-hover);
+}
+
+[data-theme="light"] .audit-filter-group,
+[data-theme="light"] .rag-search-input-wrap,
+[data-theme="light"] .dash-login .form-group input,
+[data-theme="light"] .form-group input {
+    background: var(--bg-input);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+[data-theme="light"] .audit-filter-group input,
+[data-theme="light"] .audit-filter-group select,
+[data-theme="light"] .rag-search-input-wrap input {
+    color: var(--text-primary);
+}
+
+[data-theme="light"] .audit-filter-group input::placeholder,
+[data-theme="light"] .rag-search-input-wrap input::placeholder {
+    color: var(--text-muted);
+}
+
+[data-theme="light"] .rag-toggle-slider {
+    background: rgba(0, 0, 0, 0.12);
+}
+
+[data-theme="light"] .rag-msg.assistant {
+    background: var(--bg-elevated);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+[data-theme="light"] .chart-empty {
+    background: var(--bg-elevated);
+    border-color: var(--border-color);
+    color: var(--text-muted);
+}
+
+[data-theme="light"] .kpi-trend-neutral {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
 }
 
 /* ── Mobile Sidebar Toggle (hidden on desktop, no impact on desktop layout) ── */
@@ -2390,3 +2566,9 @@ body > #adminLoginPanel.dash-login {
     .header-actions { display: none; }
 }
 
+/* ──────────────────────────────────────────────────────────
+   Audit table role badge permanent fix
+   ────────────────────────────────────────────────────────── */
+.audit-table .badge {
+    color: #fff !important;
+}

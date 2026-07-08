@@ -17,7 +17,7 @@ import shutil
 import threading
 import time
 import traceback
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 from langchain_community.vectorstores import FAISS
@@ -275,10 +275,16 @@ def parse_upload_to_documents(file_bytes: bytes, filename: str) -> list[Document
     return []
 
 
-def ingest_documents(file_bytes: bytes, filename: str) -> dict[str, Any]:
+def ingest_documents(
+    file_bytes: bytes,
+    filename: str,
+    mode: Literal["replace", "append"] = "replace",
+) -> dict[str, Any]:
     """
-    Parse an uploaded file and build dense (FAISS) + sparse (BM25) indices.
-    Replaces any previously uploaded admin ERP data.
+    Parse an uploaded file and build/update dense (FAISS) + sparse (BM25) indices.
+
+    - `replace`: wipe existing data before ingest (default).
+    - `append`: add new documents to the existing index.
     """
     global _vector_store, _documents, _bm25
 
@@ -292,20 +298,46 @@ def ingest_documents(file_bytes: bytes, filename: str) -> dict[str, Any]:
     t0 = time.perf_counter()
     try:
         with _lock:
-            if os.path.isdir(PERSIST_DIR):
-                shutil.rmtree(PERSIST_DIR, ignore_errors=True)
-            os.makedirs(PERSIST_DIR, exist_ok=True)
+            if mode == "replace":
+                # Wipe and rebuild
+                if os.path.isdir(PERSIST_DIR):
+                    shutil.rmtree(PERSIST_DIR, ignore_errors=True)
+                os.makedirs(PERSIST_DIR, exist_ok=True)
 
-            embeddings = _get_embeddings()
-            vector_store = FAISS.from_texts(["init"], embeddings)
-            vector_store.add_documents(documents)
-            vector_store.save_local(PERSIST_DIR)
-            _vector_store = vector_store
+                embeddings = _get_embeddings()
+                vector_store = FAISS.from_texts(["init"], embeddings)
+                vector_store.add_documents(documents)
+                vector_store.save_local(PERSIST_DIR)
+                _vector_store = vector_store
 
-            _documents = list(documents)
-            tokenized = [_tokenize(doc.page_content) for doc in _documents]
-            _bm25 = BM25Okapi(tokenized)
+                _documents = list(documents)
+                tokenized = [_tokenize(doc.page_content) for doc in _documents]
+                _bm25 = BM25Okapi(tokenized)
+
+            else:  # append
+                # Make sure existing data is loaded
+                if not _documents:
+                    _load_bm25_from_disk()
+                store = _get_admin_vector_store()
+                if store is None:
+                    # No previous index — create one, then add
+                    os.makedirs(PERSIST_DIR, exist_ok=True)
+                    store = FAISS.from_texts(["init"], _get_embeddings())
+                    store.add_documents(documents)
+                    store.save_local(PERSIST_DIR)
+                    _vector_store = store
+                else:
+                    store.add_documents(documents)
+                    store.save_local(PERSIST_DIR)
+                    _vector_store = store
+
+                # Append to in-memory document list and rebuild BM25
+                _documents.extend(documents)
+                tokenized = [_tokenize(doc.page_content) for doc in _documents]
+                _bm25 = BM25Okapi(tokenized)
+
             _save_bm25_to_disk()
+
     except Exception:
         logger.error(
             "Admin RAG FAISS indexing failed for %s:\n%s",
@@ -316,13 +348,17 @@ def ingest_documents(file_bytes: bytes, filename: str) -> dict[str, Any]:
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     logger.info(
-        "Admin RAG ingest: %d documents indexed in %.0fms (store=faiss)",
+        "Admin RAG ingest (mode=%s): %d documents indexed in %.0fms (total=%d)",
+        mode,
         len(documents),
         elapsed_ms,
+        len(_documents),
     )
     return {
         "status": "success",
         "documents_indexed": len(documents),
+        "total_documents": len(_documents),
+        "mode": mode,
         "elapsed_ms": round(elapsed_ms),
     }
 
