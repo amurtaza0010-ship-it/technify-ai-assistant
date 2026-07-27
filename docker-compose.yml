@@ -3,7 +3,7 @@ services:
     image: redis:7-alpine
     container_name: taia_redis
     ports:
-      - "6379:6379"
+      - "6380:6379"          # external port changed to 6380
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -35,7 +35,7 @@ services:
       dockerfile: Dockerfile.fastapi
     container_name: taia_fastapi
     ports:
-      - "8000:8000"
+      - "8002:8000"               # <-- host port changed to 8002
     env_file:
       - .env
     depends_on:
@@ -44,7 +44,6 @@ services:
       erp:
         condition: service_healthy
     volumes:
-      # Named volume for Admin RAG ChromaDB storage – prevents readonly DB errors
       - admin_rag_data:/app/data/admin_rag_store
     networks:
       - taia_network
