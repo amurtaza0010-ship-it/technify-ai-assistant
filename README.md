@@ -1,148 +1,249 @@
-# Technify Academic AI Assistant (TAIA) 🎓🤖
+# Technify Academic AI Assistant (TAIA)
 
-> AI-powered academic assistant integrated with Technify University ERP
+ERP-integrated academic chatbot microservice that answers natural-language queries for students, faculty, and administrators using JWT/RBAC, dual RAG, and multi-LLM fallback.
 
-## 🏗️ Project Overview
+## Key Features
 
-TAIA is an intelligent chatbot microservice that integrates with the Technify University ERP system. It provides natural language support to students, faculty, and administrators for academic queries.
+- **Natural-language academic Q&A** — Intent classification, ERP data fetch, and contextual LLM replies for attendance, results, fees, timetable, exams, and more
+- **Role-based access control (RBAC)** — Student, Faculty, Admin, Finance Officer, and Exam Officer scopes enforced on chat and demo APIs
+- **JWT authentication** — Tokens issued by Mock ERP (or real ERP); FastAPI validates Bearer tokens on protected routes
+- **Policy knowledge base (RAG)** — ChromaDB + `all-MiniLM-L6-v2` embeddings over university policy markdown in `data/documents/`
+- **Admin hybrid RAG** — Upload CSV / XLSX / JSON / PDF / DOCX; FAISS + BM25 (RRF) retrieval with streaming answers
+- **Streaming chat** — Server-Sent Events (SSE) via `/api/v1/chat/stream` and `/api/v1/chat/rag`
+- **Multi-LLM fallback** — Groq (primary) → OpenRouter → Google Gemini Flash
+- **Conversation memory** — Redis-backed chat history with in-memory fallback
+- **Study planner** — Rule-based study recommendations from student results
+- **Audit & usage analytics** — SQLite audit log with admin dashboard endpoints and UI
+- **Flask UI + React chat widget** — Login, main chat, admin dashboard, and admin RAG chat pages
+- **Mock ERP** — FastAPI stand-in for university ERP REST APIs (synthetic JSON datasets)
 
-**Key Features:**
-- 💬 Natural language Q&A for academic information
-- 🔒 Role-based access control (Student, Faculty, Admin, Finance, Exam Officer)
-- 📚 Knowledge base with RAG for university policies
-- 📊 Study recommendations and planning
-- 🔗 Secure ERP API integration (no direct database access)
+## Tech Stack
 
-## 🛠️ Tech Stack
+| Layer | Technology |
+|-------|------------|
+| Language | Python 3.10+ / 3.11 |
+| AI API | FastAPI, Uvicorn / Gunicorn |
+| UI | Flask (Jinja) + React 19 / Vite / Tailwind chat widget |
+| LLM orchestration | LangChain (`langchain-openai`, `langchain-community`, `langchain-chroma`, `langchain-huggingface`) |
+| LLM providers | Groq, OpenRouter, Google Gemini |
+| Policy vector store | ChromaDB |
+| Admin RAG | FAISS (`faiss-cpu`) + BM25 (`rank-bm25`) |
+| Embeddings | sentence-transformers / HuggingFace `all-MiniLM-L6-v2` |
+| Memory | Redis (+ in-memory fallback) |
+| Auth | python-jose (JWT HS256) |
+| Audit DB | SQLAlchemy + SQLite |
+| HTTP client | httpx |
+| Docs / data | pandas, pdfplumber, python-docx, openpyxl, Faker |
+| Containers | Docker Compose (Redis, Mock ERP, FastAPI, Flask) |
 
-| Technology | Purpose |
-|-----------|---------|
-| Python 3.11+ | Core language |
-| FastAPI | Web framework |
-| LangChain | LLM orchestration |
-| ChromaDB | Vector database for RAG |
-| OpenAI GPT / Llama | LLM backbone |
-| JWT | Authentication |
-
-## 📁 Project Structure
+## Architecture Overview
 
 ```
-technify-ai-assistant/
-├── app/
-│   ├── main.py              # FastAPI entry point
-│   ├── auth/                # JWT & RBAC
-│   ├── api/                 # API routes & middleware
-│   ├── services/            # Business logic
-│   ├── chains/              # LangChain chains
-│   ├── prompts/             # Prompt templates
-│   └── models/              # Data models
-├── data/
-│   ├── synthetic/           # Test data
-│   ├── documents/           # Policy PDFs
-│   └── vector_store/        # ChromaDB storage
-├── mock_erp/                # Mock ERP for testing
-├── scripts/                 # Utility scripts
-├── tests/                   # Test files
-└── docs/                    # Documentation
+Browser (Flask UI :5000)
+  │  login  → Flask proxy → Mock ERP /api/v1/auth/login → JWT
+  │  chat   → Authorization: Bearer <jwt>
+  ▼
+FastAPI TAIA (:8000)  POST /api/v1/chat[/stream]
+  │  verify JWT → classify intent → RBAC check
+  ├─ study_plan     → study_planner (rule-based)
+  ├─ policy / rules → Chroma knowledge base (RAG)
+  ├─ profile / hello → JWT + prompt context
+  └─ ERP intents    → Mock ERP REST (:8801 / :8001)
+  ▼
+LLM reply (Groq → OpenRouter → Gemini) + Redis history + audit log
 ```
 
-## 🚀 Quick Start & Deployment
+**Admin RAG path:** upload file → FAISS + BM25 index → `POST /api/v1/chat/rag` → hybrid retrieve → streamed LLM answer (no ERP).
 
-We have prepared a comprehensive setup guide that covers everything from Git cloning, environment variables, Mock Data generation, and Docker Deployment.
-
-**Please refer to the official [TAIA Setup & Deployment Guide](./team_setup_guide.md) for full instructions.**
-
-### Phase 1 — Project Setup (First-Time Install)
-
-Run these commands once after cloning the repository (with your virtual environment activated):
+## Installation
 
 ```bash
 # Clone and enter the project
 git clone https://github.com/your-org/technify-ai-assistant.git
 cd technify-ai-assistant
 
-# Create and activate virtual environment
+# Create and activate a virtual environment
 python -m venv venv
 # Windows:
 .\venv\Scripts\activate
-# Mac/Linux:
+# macOS / Linux:
 source venv/bin/activate
 
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Generate mock data and vector store (required — not committed to git)
+# Generate synthetic ERP data and ingest policy documents into ChromaDB
 python scripts/generate_data.py
 python scripts/ingest_documents.py
 ```
 
-Create a `.env` file in the project root (see `team_setup_guide.md` for the full variable list).
+Copy `.env.example` to `.env` and set at least one LLM key (`GROQ_API_KEY`, `OPENROUTER_API_KEY`, or `GEMINI_API_KEY`) plus `JWT_SECRET_KEY` (must match the ERP).
 
-### Phase 2 — Development Mode (3 Terminals)
+Optional (all-in-one npm runner):
 
-Start all three services in **separate terminal windows** (venv activated in each):
-
-**Terminal 1 — Mock ERP (port 8001):**
 ```bash
-uvicorn mock_erp.main:app --port 8001
+npm install
 ```
 
-**Terminal 2 — FastAPI AI Backend (port 8000):**
+## How to Run
+
+### Development (three terminals)
+
+**Terminal 1 — Mock ERP** (port `8801`; Docker maps `8001`):
+
+```bash
+uvicorn mock_erp.main:app --reload --host 127.0.0.1 --port 8801
+```
+
+**Terminal 2 — FastAPI AI backend** (port `8000`):
+
 ```bash
 python -m app.main
+# or: uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-**Terminal 3 — Flask UI with React Chat Widget (port 5000):**
+**Terminal 3 — Flask UI** (port `5000`):
+
 ```bash
 python ui_app/app.py
 ```
 
-Open the UI at: **http://127.0.0.1:5000**
+Open **http://127.0.0.1:5000**
 
-#### Rebuilding the React Chat Widget
-
-After making changes inside `chat_widget/`, rebuild and redeploy static assets:
+Or run all three with:
 
 ```bash
-cd chat_widget
-npm run build
-```
-
-Then copy the generated `.js` and `.css` files from `chat_widget/dist/assets/` into `ui_app/static/` and update the filenames in `ui_app/templates/index.html` if they changed.
-
-For local React development (hot reload on port 5173):
-
-```bash
-cd chat_widget
 npm run dev
+# or: scripts/start_dev.ps1  /  scripts/start_dev.sh
 ```
 
-The Vite dev server proxies `/api` requests to `http://localhost:8000`.
+### Docker
 
-### Key Deployment Features
-- **Development Mode**: Run locally with direct access to FastAPI, Mock ERP, and the Flask Frontend.
-- **Production Mode**: One-click deployment using `docker-compose up --build -d` which spins up the AI Gateway, Mock ERP, and a Redis container.
-- **Admin Dashboard**: Integrated UI dashboard to view all user queries, latency metrics, and roles from the SQLite audit logs.
+```bash
+docker-compose up --build -d
+```
 
-## 👥 Team
+Services: Redis (`6379`), Mock ERP (`8001`), FastAPI (`8000`), Flask (`5000`).
 
-| Role | Responsibility |
-|------|---------------|
-| Team Lead | Architecture, LangChain pipeline, code review |
-| Backend Dev 1 | FastAPI, JWT auth, API gateway |
-| Backend Dev 2 | ERP connectors, audit logging |
-| AI/NLP Dev | LangChain chains, prompts, conversation |
-| RAG Dev | ChromaDB, document ingestion, knowledge base |
-| Data/Test | Synthetic data, testing, documentation |
+### React chat widget
 
-## 📋 Modules
+```bash
+cd chat_widget
+npm install
+npm run build   # copy dist assets into ui_app/static/ if filenames change
+npm run dev     # hot reload on :5173 (proxies /api → :8000)
+```
 
-1. **User Auth Verification** — JWT validation & role checking
-2. **Academic Info Retrieval** — ERP API connectors
-3. **Knowledge Base (RAG)** — University policy Q&A
-4. **Study Recommendations** — Study plans & course suggestions
-5. **Conversation Management** — Context-aware multi-turn chat
+## API Endpoints
 
-## 📄 License
+### FastAPI AI backend (`:8000`)
 
-Internal project — Technify Software House © 2026
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Service info |
+| `GET` | `/health` | Health + vector-store warmup status |
+| `GET` | `/docs`, `/redoc` | OpenAPI docs |
+| `POST` | `/api/v1/chat` | Main chat (JWT); `{response, intent, time, perf}` |
+| `POST` | `/api/v1/chat/stream` | Same pipeline over SSE |
+| `GET` | `/api/v1/chat/history/list/{user_id}` | List chat sessions |
+| `GET` | `/api/v1/chat/history/{user_id}` | Load session messages (`?session_id=`) |
+| `POST` | `/api/v1/chat/rag` | Admin RAG chat (SSE) |
+| `GET` | `/api/v1/admin/audit-logs` | Recent audit rows (Admin) |
+| `GET` | `/api/v1/admin/usage-stats` | Usage stats (Admin) |
+| `GET` | `/api/v1/admin/rag/status` | Admin RAG index status |
+| `POST` | `/api/v1/admin/rag/upload` | Upload & ingest admin RAG file |
+| `GET` | `/api/v1/student/attendance` | Demo student attendance |
+| `GET` | `/api/v1/faculty/at-risk-students` | Demo faculty at-risk list |
+| `GET` | `/api/v1/admin/fee-report` | Demo admin fee report |
+
+### Flask UI (`:5000`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Main chat UI |
+| `GET` | `/admin` | Admin dashboard (audit / metrics) |
+| `GET` | `/admin/rag-chat` | Admin RAG upload + chat UI |
+| `POST` | `/api/v1/auth/login` | Proxy login → Mock ERP |
+
+### Mock ERP (`:8801` / `:8001`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/`, `/health` | Health |
+| `POST` | `/api/v1/auth/login` | Issue JWT `{user_id, role}` |
+| `GET` | `/api/v1/student/{id}/*` | Profile, attendance, results, GPA, courses, timetable, exams, assignments, fees |
+| `GET` | `/api/v1/faculty/{id}/*` | Teaching, courses, assignments, course analytics |
+| `GET` | `/api/v1/admin/*` | Statistics, fees, at-risk, exams, finance |
+
+## Environment Variables
+
+Create a `.env` in the project root (see `.env.example`). Important variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `GROQ_API_KEY` / `LLM_API_KEY` / `OPENAI_API_KEY` | Primary LLM credentials (Groq preferred) |
+| `LLM_BASE_URL` | OpenAI-compatible base URL (default Groq or OpenRouter) |
+| `GROQ_PRIMARY_MODEL` / `LLM_MODEL` | Primary chat model |
+| `LLM_FALLBACK_MODEL` | OpenRouter fallback model |
+| `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OPENROUTER_BASE_URL` | OpenRouter fallback |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Gemini tertiary fallback |
+| `ERP_API_BASE_URL` | Mock/real ERP API root (e.g. `http://127.0.0.1:8801/api/v1`) |
+| `TAIA_API_URL` | Browser-facing FastAPI URL (`http://127.0.0.1:8000`) |
+| `ERP_PUBLIC_URL` | Browser-facing ERP URL |
+| `JWT_SECRET_KEY`, `JWT_ALGORITHM` | Must match ERP JWT config (`HS256`) |
+| `CHROMA_PERSIST_DIR` | Policy vector store path (`./data/vector_store`) |
+| `ADMIN_RAG_PERSIST_DIR`, `ADMIN_BM25_INDEX_PATH` | Admin hybrid RAG storage |
+| `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`, `REDIS_URL` | Chat memory |
+| `DATABASE_URL` | Audit SQLite/DB URL (defaults to local `.audit.db`) |
+| `CORS_ALLOW_ALL`, `CORS_ORIGINS` | CORS for UI origins |
+| `APP_HOST`, `APP_PORT`, `APP_DEBUG`, `LOG_LEVEL` | Server / logging |
+| `SECRETS_ENCRYPTION_KEY` | Optional secrets encryption |
+
+## Project Structure
+
+```
+technify-ai-assistant/
+├── app/                      # FastAPI AI backend
+│   ├── main.py               # Entry point & API routes
+│   ├── config.py             # Settings (LLM, ERP, Admin RAG)
+│   ├── auth/                 # JWT + RBAC
+│   ├── chains/               # Intent, memory, ERP handlers, chat
+│   ├── services/             # LLM, RAG, ERP, audit, study planner
+│   ├── middleware/           # JWT middleware
+│   ├── prompts/              # Prompt templates
+│   └── models/               # Data models
+├── ui_app/                   # Flask frontend
+│   ├── app.py
+│   ├── templates/            # index, admin, rag_chat
+│   └── static/               # CSS/JS + built React widget
+├── chat_widget/              # React + Vite + Tailwind chat UI
+├── mock_erp/                 # Mock university ERP (FastAPI)
+├── config/                   # Shared ERP / Redis / secrets / logging
+├── memory/                   # Redis conversation memory
+├── logging/                  # Audit logger & telemetry
+├── data/
+│   ├── documents/            # Policy markdown (RAG corpus)
+│   ├── synthetic/            # Generated Mock ERP JSON
+│   ├── vector_store/         # ChromaDB (generated)
+│   └── admin_rag_store/      # FAISS + BM25 (generated)
+├── scripts/                  # Data gen, ingest, audit helpers
+├── tests/                    # pytest suite
+├── docs/                     # Architecture & API docs
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
+```
+
+## Future Improvements
+
+- Connect to a production ERP instead of the Mock ERP
+- Persistent multi-tenant conversation analytics and dashboards
+- Stronger evaluation harness for retrieval quality and hallucination checks
+- Optional PostgreSQL for audit logs at scale
+- Hardened production secrets management and rate limiting per role
+
+## License and Credits
+
+**Internal project — Technify Software House © 2026**
+
+Built by the Technify AI internship team (architecture, FastAPI gateway, ERP connectors, LangChain / RAG, synthetic data, and UI). See `docs/` and `team_setup_guide.md` for deeper setup and sprint notes.
