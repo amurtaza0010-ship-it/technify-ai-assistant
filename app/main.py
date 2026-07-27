@@ -566,7 +566,12 @@ def _extract_relevant_context_sentence(text: str) -> str:
     if not text:
         return ""
 
+    # NEVER use "Not found" messages as retrieval context
+    if "not found" in text.lower():
+        return ""
+
     sentences = re.split(r"(?<=[.!?])\s+", text)
+
     # First pass: look for a sentence with a name and a page citation (ideal anchor)
     for sentence in sentences:
         candidate = sentence.strip()
@@ -584,32 +589,8 @@ def _extract_relevant_context_sentence(text: str) -> str:
 
 
 def _enhance_short_query(query: str) -> str:
-    """Expand vague short queries so retrieval can find the right entity chunks."""
-    stripped = query.strip()
-    if not stripped:
-        return query
-
-    words = stripped.split()
-    if len(words) >= _SHORT_QUERY_MAX_WORDS:
-        return query
-
-    lowered = stripped.lower().rstrip("?.! ")
-    if len(words) >= 8 and any(
-        lowered.startswith(prefix) for prefix in ("who is", "what is", "where is", "which")
-    ):
-        return query
-
-    core = lowered
-    for prefix in sorted(_QUERY_FILLER_PREFIXES, key=len, reverse=True):
-        if core.startswith(prefix):
-            core = core[len(prefix):].strip()
-            break
-
-    core = core.strip("?.! ")
-    if not core:
-        return query
-
-    return f"{core} name profile details"
+    """Return the query unchanged. (Previously added 'name profile details' to short queries, which diluted retrieval.)"""
+    return query
 
 
 def _build_rag_retrieval_query(user_msg: str, history_session: str) -> str:
@@ -655,7 +636,7 @@ async def admin_rag_status(user_data: dict = Depends(allow_only_admin)):
 @app.post('/api/v1/admin/rag/upload', tags=['Admin RAG'])
 async def admin_rag_upload(
     file: UploadFile = File(...),
-    mode: str = Form("replace"),               # <-- new parameter
+    mode: str = Form("replace"),
     user_data: dict = Depends(allow_only_admin),
 ):
     """Upload CSV/Excel/JSON ERP data and index for hybrid RAG (admin only)."""
@@ -678,7 +659,7 @@ async def admin_rag_upload(
         if not contents:
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-        result = ingest_documents(contents, filename, mode=mode)   # <-- pass mode
+        result = ingest_documents(contents, filename, mode=mode)
         return result
     except HTTPException:
         raise
@@ -718,10 +699,26 @@ async def chat_rag(
     history_session = _rag_history_session(session, uid)
     start = time.time()
 
+    # ── Safe default ──
+    chunks: list = []
+
     retrieval_query = _build_rag_retrieval_query(user_msg, history_session)
     if not retrieval_query.startswith("Context:") and not _IDENTITY_QUERY_RE.search(user_msg):
         retrieval_query = _enhance_short_query(retrieval_query)
-    chunks = hybrid_retrieve(retrieval_query, top_k=7)
+
+    # ── Debug logging after enhancement ──
+    logger.info("Final retrieval query: %s", retrieval_query[:200])
+
+    # ── Enumeration detection: increase top_k for list/count queries ──
+    # Uses word-boundary regex matching so words like "Overall", "Hall", "small"
+    # don't falsely trigger on the substring "all". Only standalone enumeration
+    # keywords count.
+    lower_msg = user_msg.lower()
+    _ENUM_KEYWORDS_RE = re.compile(r"\b(?:all|list|how many|every)\b")
+    is_enum_query = bool(_ENUM_KEYWORDS_RE.search(lower_msg))
+    top_k_val = 20 if is_enum_query else 10
+
+    chunks = hybrid_retrieve(retrieval_query, top_k=top_k_val)
     chunks = _boost_identity_chunks(user_msg, chunks)
     timer.mark(f"Hybrid RAG retrieve ({len(chunks)} chunks)")
 

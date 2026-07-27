@@ -1700,7 +1700,7 @@ body > #adminLoginPanel.dash-login {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 16px;
+    padding: 6px 16px;
     background: #0B0F14;
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 12px;
@@ -1996,7 +1996,7 @@ body > #adminLoginPanel.dash-login {
 .rag-chat-section { margin-top: 0; border-top: none; padding-top: 0; }
 
 .rag-chat-messages {
-    max-height: 200px;
+    max-height: 360px;
     overflow-y: auto;
     margin-bottom: 16px;
     display: flex;

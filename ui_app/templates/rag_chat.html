@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TAIA | RAG Chat</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="dash-body" style="display: flex; align-items: center; justify-content: center; height: 100vh;">
+    <div class="rag-chat-container" style="max-width: 1000px; width: 100%; padding: 20px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
+            <h1 style="font-size: 20px; color: var(--text-primary);">
+                <i class="fas fa-brain"></i> RAG Chat
+            </h1>
+            <a href="/admin" style="color: var(--text-secondary); text-decoration: none; font-size: 14px;">
+                <i class="fas fa-arrow-left"></i> Back to Dashboard
+            </a>
+        </div>
+
+        <div class="rag-controls" style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px; flex-wrap: wrap;">
+            <label class="rag-toggle" title="When enabled, questions use uploaded ERP data">
+                <input type="checkbox" id="ragModeToggle" onchange="onRagModeToggle()">
+                <span class="rag-toggle-slider"></span>
+                <span class="rag-toggle-label">RAG Mode</span>
+            </label>
+
+            <input type="file" id="ragFileInput" accept=".csv,.xlsx,.json,.pdf,.docx" hidden onchange="handleRagUpload(event)">
+
+            <button class="dash-btn-primary dash-btn-sm" type="button" onclick="document.getElementById('ragFileInput').click()">
+                <i class="fas fa-upload"></i> Upload ERP Data
+            </button>
+
+            <label class="rag-append-label" for="ragAppendMode" title="Keep existing indexed documents and add new upload">
+                <input type="checkbox" id="ragAppendMode">
+                Add to existing index
+            </label>
+        </div>
+
+        <div id="ragUploadStatus" class="rag-status" style="margin-bottom:10px;"></div>
+
+        <div id="ragChatMessages"
+             class="rag-chat-messages"
+             style="border:1px solid var(--border-color);
+                    border-radius:12px;
+                    padding:12px;
+                    height:800px;
+                    overflow-y:auto;
+                    margin-bottom:15px;
+                    background:var(--bg-card);">
+        </div>
+
+        <form class="rag-search-form"
+              onsubmit="sendRagQuery(event)"
+              style="display:flex; gap:10px; align-items:flex-end;">
+
+            <div class="rag-search-input-wrap"
+                 style="flex:1;
+                        display:flex;
+                        align-items:flex-start;
+                        border:1px solid var(--border-color);
+                        border-radius:12px;
+                        background:var(--bg-card);
+                        padding:10px 14px;">
+
+                <i class="fas fa-search"
+                   style="margin-top:8px; margin-right:10px; color:var(--text-secondary);"></i>
+
+                <!-- ONLY CHANGED THIS PART -->
+                <textarea
+                    id="ragChatInput"
+                    rows="4"
+                    placeholder="Ask a question about your uploaded ERP data..."
+                    autocomplete="off"
+                    style="
+                        width:100%;
+                        min-height:100px;
+                        max-height:250px;
+                        resize:vertical;
+                        background:transparent;
+                        border:none;
+                        outline:none;
+                        color:var(--text-primary);
+                        font-size:15px;
+                        font-family:inherit;
+                        line-height:1.5;
+                    "
+                ></textarea>
+
+            </div>
+
+            <button type="submit"
+                    class="dash-btn-primary"
+                    id="ragSendBtn"
+                    style="height:50px;">
+                <i class="fas fa-paper-plane"></i> Ask
+            </button>
+
+        </form>
+    </div>
+
+    <script>
+        if (!localStorage.getItem('theme')) {
+            localStorage.setItem('theme', 'dark');
+        }
+
+        window.TAIA_CONFIG = {
+            AI_API_URL: {{ taia_ai_url | tojson }},
+            ERP_API_URL: {{ taia_erp_url | tojson }}
+        };
+    </script>
+
+    <script src="{{ url_for('static', filename='rag_chat.js') }}"></script>
+</body>
+</html>

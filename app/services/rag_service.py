@@ -126,10 +126,14 @@ def _save_bm25_to_disk() -> None:
 
 
 def _format_chunk(doc: Document) -> str:
-    page = doc.metadata.get("page")
-    if page is not None:
-        return f"[Page {page}] {doc.page_content}"
-    return doc.page_content
+    pages = doc.metadata.get("page")
+    if not pages:
+        return doc.page_content
+    if isinstance(pages, int):
+        pages = [pages]
+    if len(pages) == 1:
+        return f"[Page {pages[0]}] {doc.page_content}"
+    return f"[Pages {', '.join(str(p) for p in pages)}] {doc.page_content}"
 
 
 def _get_admin_vector_store() -> FAISS | None:
@@ -172,23 +176,231 @@ def _clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
-def _parse_pdf_documents(file_bytes: bytes, filename: str) -> list[Document]:
-    """Extract one Document per PDF page with 1-indexed page metadata."""
-    try:
-        from PyPDF2 import PdfReader
+# ── Natural boundary splitting with real offsets ──
+_BULLET_PATTERN = re.compile(r"^\s*(?:•|-|\d+\.)\s+", re.MULTILINE)
 
-        reader = PdfReader(io.BytesIO(file_bytes))
-        documents: list[Document] = []
-        for page_number, page in enumerate(reader.pages):
-            cleaned = _clean_text(page.extract_text() or "")
-            if cleaned:
-                documents.append(
-                    Document(page_content=cleaned, metadata={"page": page_number + 1})
-                )
-        return documents
-    except Exception as exc:
-        logger.error("Failed to parse PDF file %s: %s", filename, exc, exc_info=True)
+
+def _split_into_natural_units(text: str) -> list[tuple[str, int, int]]:
+    """
+    Split text into natural units (paragraphs, bullet items).
+    Returns list of (unit_text, start_char, end_char) where start_char is inclusive
+    and end_char is exclusive in the original text.
+
+    IMPORTANT: When a paragraph contains a bullet list, any heading/intro text that
+    appears BEFORE the first bullet marker (e.g. "Civil Engineering Department
+    Laboratories:") is prepended to every individual bullet item's text. This keeps
+    section/department context attached to each list item even when that item is
+    retrieved in isolation as its own chunk — without this, isolated bullet items
+    like "Structures Lab" would carry no signal connecting them to "Civil
+    Engineering", making them nearly unretrievable for department-scoped queries.
+    Only the page_content carries the prepended heading; character offsets used for
+    page-number metadata stay anchored to the bullet item's own true position.
+    """
+    units: list[tuple[str, int, int]] = []
+
+    # Find all paragraphs by splitting on blank lines, with real offsets
+    for match in re.finditer(r"(?s)(?:^|\n\s*\n)\s*([^\n].*?)(?=\n\s*\n|\Z)", text):
+        para = match.group(1).strip()
+        if not para:
+            continue
+        # para_start is the start of the non-whitespace content after the blank line
+        para_start = match.start(1)
+
+        # Check if this paragraph contains bullet lines
+        bullet_lines = [m for m in _BULLET_PATTERN.finditer(para)]
+
+        if len(bullet_lines) >= 1:
+            # Text before the first bullet marker = heading/intro context for the list
+            heading_text = para[: bullet_lines[0].start()].strip()
+
+            # Split the paragraph into individual bullet items
+            item_boundaries = []
+            for i, m in enumerate(bullet_lines):
+                start = m.start()
+                if i + 1 < len(bullet_lines):
+                    end = bullet_lines[i + 1].start()
+                else:
+                    end = len(para)
+                item_boundaries.append((start, end))
+
+            for local_start, local_end in item_boundaries:
+                item_text = para[local_start:local_end].strip()
+                if not item_text:
+                    continue
+                # Prepend heading context to the item's indexed text (content only —
+                # offsets below stay tied to the bullet item itself, not the heading,
+                # so page-number mapping remains accurate).
+                if heading_text:
+                    item_text = f"{heading_text} {item_text}"
+                abs_start = para_start + local_start
+                abs_end = para_start + local_end
+                units.append((item_text, abs_start, abs_end))
+        else:
+            # No bullets, keep as whole paragraph
+            para_end = match.end(1)
+            units.append((para, para_start, para_end))
+
+    return units
+
+
+def _split_oversized_unit(unit_text: str, start_char: int, chunk_size: int) -> list[tuple[str, int, int]]:
+    """
+    Split a single unit that exceeds chunk_size using a plain sliding window,
+    preserving real character offsets.
+    """
+    result = []
+    unit_len = len(unit_text)
+    overlap = 200
+    pos = 0
+    while pos < unit_len:
+        chunk = unit_text[pos : pos + chunk_size].strip()
+        if chunk:
+            result.append((chunk, start_char + pos, start_char + pos + len(chunk)))
+        pos += chunk_size - overlap
+        if pos >= unit_len:
+            break
+    return result
+
+
+def _parse_pdf_documents(file_bytes: bytes, filename: str) -> list[Document]:
+    """
+    Extract text from PDF using pdfplumber (better reading order, table handling).
+    Chunks are created across page boundaries with overlap and consistent metadata.
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        logger.error("pdfplumber not installed. Install with: pip install pdfplumber")
         return []
+
+    documents: list[Document] = []
+    full_text_parts: list[tuple[str, int]] = []  # (text, page_number)
+    table_chunks: list[Document] = []
+
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page_number, page in enumerate(pdf.pages, start=1):
+                # 1. Extract tables
+                tables = page.extract_tables()
+                for table in tables:
+                    if not table or len(table) < 2:
+                        continue
+                    headers = [str(h).strip() if h else f"Col{i}" for i, h in enumerate(table[0])]
+                    for row in table[1:]:
+                        row_dict = {
+                            headers[i]: (str(row[i]).strip() if i < len(row) and row[i] else "")
+                            for i in range(len(headers))
+                        }
+                        text = _row_to_document(row_dict)
+                        if text:
+                            table_chunks.append(
+                                Document(
+                                    page_content=text,
+                                    metadata={"page": [page_number], "source": "table"}
+                                )
+                            )
+
+                # 2. Extract regular text
+                text = (page.extract_text() or "").strip()
+                if text:
+                    full_text_parts.append((text, page_number))
+    except Exception as exc:
+        logger.error("pdfplumber failed to parse PDF %s: %s", filename, exc, exc_info=True)
+        return []
+
+    # Concatenate all page texts and build page offset ranges
+    combined_text = ""
+    page_offsets: list[tuple[int, int, int]] = []  # (start_char, end_char, page_number)
+    for text, page_num in full_text_parts:
+        start = len(combined_text)
+        combined_text += text + "\n\n"
+        end = len(combined_text)
+        page_offsets.append((start, end, page_num))
+
+    if not combined_text.strip():
+        return table_chunks
+
+    # Split into natural units with real character offsets
+    raw_units = _split_into_natural_units(combined_text)
+
+    chunk_size = 1000
+    overlap_chars = 200
+
+    # Split any unit that exceeds chunk_size
+    natural_units: list[tuple[str, int, int]] = []
+    for unit_text, unit_start, unit_end in raw_units:
+        if len(unit_text) > chunk_size:
+            natural_units.extend(_split_oversized_unit(unit_text, unit_start, chunk_size))
+        else:
+            natural_units.append((unit_text, unit_start, unit_end))
+
+    # Build chunks with overlap
+    current_chunk_units: list[tuple[str, int, int]] = []
+    current_len = 0
+    all_chunks: list[tuple[str, int, int]] = []  # (chunk_text, start_char, end_char)
+
+    def _get_pages(char_start: int, char_end: int) -> list[int]:
+        pages = set()
+        for start_off, end_off, page_num in page_offsets:
+            if char_start < end_off and char_end > start_off:
+                pages.add(page_num)
+        return sorted(pages)
+
+    for unit_text, unit_start, unit_end in natural_units:
+        unit_len = len(unit_text)
+        if current_len + unit_len <= chunk_size:
+            current_chunk_units.append((unit_text, unit_start, unit_end))
+            current_len += unit_len + 1
+        else:
+            # Finish current chunk
+            if current_chunk_units:
+                chunk_text = " ".join(u[0] for u in current_chunk_units)
+                chunk_start = current_chunk_units[0][1]
+                chunk_end = current_chunk_units[-1][2]
+                all_chunks.append((chunk_text, chunk_start, chunk_end))
+
+                # Build overlap, but don't duplicate an entire oversized unit
+                overlap_units = []
+                overlap_len = 0
+                for u in reversed(current_chunk_units):
+                    if len(u[0]) > overlap_chars and not overlap_units:
+                        # This single unit is already larger than overlap_chars;
+                        # start fresh without it to avoid full duplication
+                        break
+                    overlap_units.insert(0, u)
+                    overlap_len += len(u[0]) + 1
+                    if overlap_len >= overlap_chars:
+                        break
+                current_chunk_units = overlap_units
+                current_len = overlap_len
+
+            # Add the new unit to the current (possibly fresh) chunk
+            current_chunk_units.append((unit_text, unit_start, unit_end))
+            current_len += unit_len + 1
+
+    # Last chunk
+    if current_chunk_units:
+        chunk_text = " ".join(u[0] for u in current_chunk_units)
+        chunk_start = current_chunk_units[0][1]
+        chunk_end = current_chunk_units[-1][2]
+        all_chunks.append((chunk_text, chunk_start, chunk_end))
+
+    # Convert to Document objects
+    for chunk_text, start_char, end_char in all_chunks:
+        pages = _get_pages(start_char, end_char)
+        if pages:
+            documents.append(
+                Document(page_content=chunk_text.strip(), metadata={"page": pages})
+            )
+
+    documents.extend(table_chunks)
+
+    logger.info(
+        "PDF parsed with pdfplumber: %d text chunks + %d table chunks",
+        len(documents) - len(table_chunks),
+        len(table_chunks),
+    )
+    return documents
 
 
 def _parse_docx_documents(file_bytes: bytes, filename: str) -> list[Document]:
@@ -299,7 +511,6 @@ def ingest_documents(
     try:
         with _lock:
             if mode == "replace":
-                # Wipe and rebuild
                 if os.path.isdir(PERSIST_DIR):
                     shutil.rmtree(PERSIST_DIR, ignore_errors=True)
                 os.makedirs(PERSIST_DIR, exist_ok=True)
@@ -315,12 +526,10 @@ def ingest_documents(
                 _bm25 = BM25Okapi(tokenized)
 
             else:  # append
-                # Make sure existing data is loaded
                 if not _documents:
                     _load_bm25_from_disk()
                 store = _get_admin_vector_store()
                 if store is None:
-                    # No previous index — create one, then add
                     os.makedirs(PERSIST_DIR, exist_ok=True)
                     store = FAISS.from_texts(["init"], _get_embeddings())
                     store.add_documents(documents)
@@ -331,7 +540,6 @@ def ingest_documents(
                     store.save_local(PERSIST_DIR)
                     _vector_store = store
 
-                # Append to in-memory document list and rebuild BM25
                 _documents.extend(documents)
                 tokenized = [_tokenize(doc.page_content) for doc in _documents]
                 _bm25 = BM25Okapi(tokenized)
@@ -372,7 +580,7 @@ def _reciprocal_rank_fusion(rankings: list[list[int]], top_k: int) -> list[int]:
     return [idx for idx, _ in ordered[:top_k]]
 
 
-def hybrid_retrieve(query: str, top_k: int = 7) -> list[Document]:
+def hybrid_retrieve(query: str, top_k: int = 10) -> list[Document]:
     """
     Hybrid search: top dense (vector) + top sparse (BM25) candidates merged via RRF.
     Returns the top_k Document objects (page_content + metadata, e.g. page number).
@@ -429,7 +637,7 @@ def hybrid_retrieve(query: str, top_k: int = 7) -> list[Document]:
     ]
 
     logger.info(
-        f"RAG final chunks (top 7): pages={[doc.metadata.get('page', '?') for doc in final_chunks]}"
+        f"RAG final chunks (top {top_k}): pages={[doc.metadata.get('page', '?') for doc in final_chunks]}"
     )
 
     logger.info(
